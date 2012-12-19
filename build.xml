@@ -668,7 +668,7 @@
     <target name="build-subprojects" description="Compile Cassandra contrib projects"/>
 
     <target name="codecoverage" depends="maven-declare-dependencies,
-                                         cobertura-instrument"
+                                         cobertura-instrument, test"
             description="Create code coverage report">
       <!-- Run Cassandra-dtests -->
       <exec executable="test/coverage/run-dtests.sh"

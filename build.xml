@@ -158,6 +158,7 @@
         <delete dir="${cobertura.classes.dir}" />
         <delete dir="${build.src.gen-java}" />
         <delete file="${build.dir}/internode.avpr" />
+        <delete dir="${build.dir}/cobertura" />
     </target>
     <target depends="clean" name="cleanall"/>
 
@@ -665,7 +666,30 @@
     <target name="build"
         depends="maven-ant-tasks-retrieve-build,avro-generate,build-subprojects,build-project" description="Compile Cassandra classes"/>
     <target name="build-subprojects" description="Compile Cassandra contrib projects"/>
-    <target name="codecoverage" depends="cobertura-instrument,test,cobertura-report" description="Create code coverage report"/>
+
+    <target name="codecoverage" depends="maven-declare-dependencies,
+                                         cobertura-instrument"
+            description="Create code coverage report">
+      <!-- Run Cassandra-dtests -->
+      <exec executable="test/coverage/run-dtests.sh"
+            failonerror="true">
+        <arg value="${basedir}"/>
+      </exec>
+      <!-- Generage report -->
+      <artifact:dependencies pathId="coverage-classpath">
+        <dependency groupId="net.sourceforge.cobertura"
+                    artifactId="cobertura"
+                    version="${cobertura.version}" />
+      </artifact:dependencies>
+      <java classname="net.sourceforge.cobertura.reporting.Main">
+        <arg value="--destination"/>
+        <arg value="${cobertura.report.dir}"/>
+        <arg value="--datafile"/>
+        <arg value="${cobertura.datafile}"/>
+        <arg value="${build.src.java}"/>
+        <classpath refid="coverage-classpath"/>
+      </java>
+    </target>
 
     <target depends="init,avro-generate,gen-cli-grammar,gen-cql2-grammar,gen-cql3-grammar"
             name="build-project">
@@ -1152,7 +1176,7 @@
       <classpath refid="cobertura.classpath"/>
     </taskdef>
 
-    <delete file="${cobertura.datafile}"/>
+    <delete dir="${build.dir}/cobertura" />
 
     <cobertura-instrument todir="${cobertura.classes.dir}" datafile="${cobertura.datafile}">
       <ignore regex="org.apache.log4j.*"/>

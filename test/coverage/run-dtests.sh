@@ -16,6 +16,11 @@ if [ $? != 0 ] ; then
     echo "Coverage reports require nose (http://github.com/nose-devs/nose) to be installed. Aborting."
     exit 1;
 fi
+python2 -c "import cql" > /dev/null 2>&1
+if [ $? != 0 ] ; then
+    echo "Coverage reports require cassandra-dbapi2 (https://code.google.com/a/apache-extras.org/p/cassandra-dbapi2/) to be installed. Aborting."
+    exit 1;
+fi
 
 # Clone cassandra-dtests:
 pushd $1/build/cobertura/
@@ -24,10 +29,31 @@ pushd $1/build/cobertura/
 # upstream repositories:
 git clone https://github.com/EnigmaCurry/cassandra-dtest.git
 cd cassandra-dtest
+# Move the cobertura datafile used in unit testing to the
+# cassandra-dtest directory. For some reason, dtest will create a
+# local datafile regardless if you set the datafile path. So just go
+# with the flow and create it here locally:
+# Wait for cobertura data file to be unlocked:
+while [ -e ../cobertura.ser.lock ]; do
+  echo "Waiting for cobertura to finish up..."
+  sleep 2
+done 
+mv ../cobertura.ser .
 git checkout cobertura-fixes
+# The 'demonstrate' tests aren't working for me, let's skip them:
 rm -rf demonstrate
 
 echo "cassandra-dtests running...."
-CASSANDRA_DIR=$1 python2 -c "import nose; nose.run()" 2>&1
+CASSANDRA_DIR=$1 nosetests2 -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
+
+# Wait for cobertura data file to be unlocked:
+while [ -e cobertura.ser.lock ]; do
+  echo "Waiting for cobertura to finish up..."
+  sleep 2
+done 
+
+# Copy the dtest cobertura datafile back to it's original location
+# before the report is generated:
+mv cobertura.ser ..
 
 exit 0;

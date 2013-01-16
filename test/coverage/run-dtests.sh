@@ -48,8 +48,19 @@ mv ../cobertura.ser .
 # The 'demonstrate' tests aren't working for me, let's skip them:
 rm -rf demonstrate
 
+# First pass - Run dtests normally:
 echo "cassandra-dtests running..."
 CASSANDRA_DIR=$1 nosetests2 -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
+
+# Wait for cobertura data file to be unlocked:
+while [ -e cobertura.ser.lock ]; do
+  echo "Waiting for cobertura to finish up..."
+  sleep 2
+done 
+
+# Second pass - Run dtests with vnodes:
+echo "cassandra-dtests with vnodes running..."
+ENABLE_VNODES=true CASSANDRA_DIR=$1 nosetests2 -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do

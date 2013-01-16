@@ -677,8 +677,12 @@
         The codecoverage target runs unit tests, cassandra-dtests and
         generates a code coverage report.
     -->
+    <target name="_ignoretestfail">
+      <property name="ant.test.failure.ignore" value="true"/>
+    </target>
     <target name="codecoverage" depends="maven-declare-dependencies,
-                                         cobertura-instrument, test"
+                                         cobertura-instrument,
+                                         _ignoretestfail, test"
             description="Create code coverage report">
       <!-- Run Cassandra-dtests -->
       <exec executable="test/coverage/run-dtests.sh"

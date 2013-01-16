@@ -12,7 +12,7 @@ CASSANDRA_HOME=$1
 # Check if dependencies are installed:
 DEPENDENCIES_NOT_MET=0
 command -v git >/dev/null 2>&1 || { echo >&2 "Coverage reports require git (http://git-scm.com) to be installed."; DEPENDENCIES_NOT_MET=1; }
-command -v python2 >/dev/null 2>&1 || { echo >&2 "Coverage reports require Python (http://python.org) to be installed."; DEPENDENCIES_NOT_MET=1; }
+command -v python2 >/dev/null 2>&1 || { echo >&2 "Coverage reports require Python 2.x (http://python.org) to be installed."; DEPENDENCIES_NOT_MET=1; }
 command -v ccm >/dev/null 2>&1 || { echo >&2 "Coverage reports require ccm (http://github.com/pcmanus/ccm) to be installed."; DEPENDENCIES_NOT_MET=1; }
 python2 -c "import nose" > /dev/null 2>&1
 if [ $? != 0 ] ; then
@@ -48,9 +48,14 @@ mv ../cobertura.ser .
 # The 'demonstrate' tests aren't working for me, let's skip them:
 rm -rf demonstrate
 
+EXCLUDE_TESTS="'upgrade|decommission|sstable_gen|global_row|putget_2dc|cql3_insert'"
+
+# Platform independent python2 nose command:
+NOSE="python2 -c 'import nose; nose.main()'"
+
 # First pass - Run dtests normally:
 echo "cassandra-dtests running..."
-CASSANDRA_DIR=$1 nosetests2 -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
+CASSANDRA_DIR=$1 $NOSE -e $EXCLUDE_TESTS -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do
@@ -60,7 +65,7 @@ done
 
 # Second pass - Run dtests with vnodes:
 echo "cassandra-dtests with vnodes running..."
-ENABLE_VNODES=true CASSANDRA_DIR=$1 nosetests2 -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
+ENABLE_VNODES=true CASSANDRA_DIR=$1 $NOSE -e $EXCLUDE_TESTS -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do

@@ -1,13 +1,13 @@
 #!/bin/sh
 
 # parameters:
-#  - the CASSANDRA_HOME directory
+#  - the CASSANDRA_DIR directory
 if [ $# -lt 1 ]; then
   echo "Usage: run-dtests.sh <Cassandra-Directory>";
   exit 1;
 fi
 
-CASSANDRA_HOME=$1
+export CASSANDRA_DIR=$1
 
 # Check if dependencies are installed:
 DEPENDENCIES_NOT_MET=0
@@ -30,7 +30,7 @@ if [ $DEPENDENCIES_NOT_MET != 0 ] ; then
 fi
 
 
-pushd $CASSANDRA_HOME/build/cobertura/
+pushd $CASSANDRA_DIR/build/cobertura/
 
 # Clone cassandra-dtests:
 git clone git://github.com/riptano/cassandra-dtest.git
@@ -45,17 +45,23 @@ done
 # local datafile regardless if you set the datafile path. So just go
 # with the flow and create it here locally:
 mv ../cobertura.ser .
-# The 'demonstrate' tests aren't working for me, let's skip them:
+# Delete some tests that aren't working:
 rm -rf demonstrate
+rm upgrade_through_versions_test*
 
-EXCLUDE_TESTS="'upgrade|decommission|sstable_gen|global_row|putget_2dc|cql3_insert'"
+EXCLUDE_TESTS="-e 'upgrade|decommission|sstable_gen|global_row|putget_2dc|cql3_insert'"
 
-# Platform independent python2 nose command:
-NOSE="python2 -c 'import nose; nose.main()'"
+# Find a suitable nose executable:
+for nose in nosetests-2.7 nosetests-2.6 nosetests2 nosetests; do
+    if which $nose > /dev/null 2>&1; then
+        export NOSE=$nose
+        break
+    fi
+done
 
 # First pass - Run dtests normally:
 echo "cassandra-dtests running..."
-CASSANDRA_DIR=$1 $NOSE -e $EXCLUDE_TESTS -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
+$NOSE $EXCLUDE_TESTS -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do
@@ -65,7 +71,7 @@ done
 
 # Second pass - Run dtests with vnodes:
 echo "cassandra-dtests with vnodes running..."
-ENABLE_VNODES=true CASSANDRA_DIR=$1 $NOSE -e $EXCLUDE_TESTS -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
+ENABLE_VNODES=true $NOSE $EXCLUDE_TESTS -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do

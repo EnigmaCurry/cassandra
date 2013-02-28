@@ -35,12 +35,13 @@ port = 9160
 ;factory = cqlshlib.ssl.ssl_transport_factory
 
 ;[ssl]
-;certfile = ~/keys/cassandra.cert
+;ca_certs = ~/keys/my_ca.pem
+;client_cert = ~/keys/my_cert.pem
 ;; optional - true by default.
 ;validate = true
 
 ;; optional section, overrides default certfile in [ssl] section, if present
-;[certfiles]
+;[ca_certs]
 ;192.168.1.3 = ~/keys/cassandra01.cert
 ;192.168.1.4 = ~/keys/cassandra02.cert
 

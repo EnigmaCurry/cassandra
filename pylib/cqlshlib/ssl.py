@@ -27,13 +27,13 @@ def ssl_transport_factory(host, port, env, config_file):
     * host .........: hostname of Cassandra node.
     * port .........: port number to connect to.
     * env ..........: environment variables. SSL factory will use, if passed,
-                      SSL_CERTFILE and SSL_VALIDATE variables.
+                      SSL_CACERTS and SSL_VALIDATE variables.
     * config_file ..: path to cqlsh config file (usually ~/.cqlshrc).
                       SSL factory will use, if set, certfile and validate
                       options in [ssl] section, as well as host to certfile
                       mapping in [certfiles] section.
 
-    [certfiles] section is optional, 'validate' setting in [ssl] section is
+    [ca_certs] section is optional, 'validate' setting in [ssl] section is
     optional too. If validation is enabled then SSL certfile must be provided
     either in the config file or as an environment variable.
     Environment variables override any options set in cqlsh config file.
@@ -52,19 +52,24 @@ def ssl_transport_factory(host, port, env, config_file):
         ssl_validate = get_option('ssl', 'validate')
     ssl_validate = ssl_validate is None or ssl_validate.lower() != 'false'
 
-    ssl_certfile = env.get('SSL_CERTFILE')
-    if ssl_certfile is None:
-        ssl_certfile = get_option('certfiles', host)
-    if ssl_certfile is None:
-        ssl_certfile = get_option('ssl', 'certfile')
-    if ssl_validate and ssl_certfile is None:
+    ssl_cacerts = env.get('SSL_CACERTS')
+    if ssl_cacerts is None:
+        ssl_cacerts = get_option('ca_certs', host)
+    if ssl_cacerts is None:
+        ssl_cacerts = get_option('ssl', 'ca_certs')
+    if ssl_validate and ssl_cacerts is None:
         sys.exit("Validation is enabled; SSL transport factory requires a valid certfile "
                  "to be specified. Please provide path to the certfile in [ssl] section "
-                 "as 'certfile' option in %s (or use [certfiles] section) or set SSL_CERTFILE "
+                 "as 'ca_certs' option in %s (or use [ca_certs] section) or set SSL_CACERTS "
                  "environment variable." % (config_file,))
-    if not ssl_certfile is None:
-        ssl_certfile = os.path.expanduser(ssl_certfile)
+    if not ssl_cacerts is None:
+        ssl_cacerts = os.path.expanduser(ssl_cacerts)
 
-    tsocket = TSSLSocket.TSSLSocket(host, port, ca_certs=ssl_certfile,
-                                    validate=ssl_validate)
+    ssl_client_cert = env.get('SSL_CLIENTCERT')
+    if ssl_client_cert is None:
+        ssl_client_cert = get_option('ssl', 'client_cert')
+    
+    tsocket = TSSLSocket.TSSLSocket(host, port, ca_certs=ssl_cacerts,
+                                    validate=ssl_validate, 
+                                    certfile=ssl_client_cert)
     return TTransport.TFramedTransport(tsocket)

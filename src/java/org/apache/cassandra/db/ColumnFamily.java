@@ -467,4 +467,9 @@ public class ColumnFamily implements IRowCacheEntry, Iterable<Column>
 
         return false;
     }
+
+    public long size()
+    {
+        return ObjectSizes.measureDeep(this);
+    }
 }

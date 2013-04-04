@@ -167,6 +167,10 @@ JVM_OPTS="$JVM_OPTS -XX:+UseThreadPriorities"
 # http://tech.stolsvik.com/2010/01/linux-java-thread-priorities-workaround.html
 JVM_OPTS="$JVM_OPTS -XX:ThreadPriorityPolicy=42"
 
+# disable thread biased locking as it does not suite worker pool based applications
+# see https://issues.apache.org/jira/browse/CASSANDRA-5360
+JVM_OPTS="$JVM_OPTS -XX:-UseBiasedLocking"
+
 # min and max heap sizes should be set to the same value to avoid
 # stop-the-world GC pauses during resize, and so that we can lock the
 # heap in memory on startup to prevent any of it from being swapped

@@ -1127,6 +1127,25 @@
     </testmacro>
   </target>
     
+  <target name="test-filter" depends="build-test">
+    <fail unless="test-filter" message="Property not set: test-filter${line.separator}
+${line.separator}
+Examples: ${line.separator}${line.separator}
+  Run all tests named SerializationsTest.java:${line.separator}
+   $ ant test-filter -Dtest-filter=SerializationsTest.java${line.separator}${line.separator}
+  Run just the SerializationsTest in the streaming package:${line.separator}
+   $ ant test-filter -Dtest-filter=streaming/SerializationsTest.java${line.separator}${line.separator}
+  Run all the tests in the cql package recursively:${line.separator}
+   $ ant test-filter -Dtest-filter=cql/**"/>
+    <testmacro suitename="unit" inputdir="${test.unit.src}"
+               timeout="60000" filter="**/${test-filter}">
+      <jvmarg value="-Dlegacy-sstable-root=${test.data}/legacy-sstables"/>
+      <jvmarg value="-Dcorrupt-sstable-root=${test.data}/corrupt-sstables"/>
+      <jvmarg value="-Dmigration-sstable-root=${test.data}/migration-sstables"/>
+      <jvmarg value="-Dcassandra.ring_delay_ms=1000"/>
+    </testmacro>
+  </target>
+
   <target name="test-compression" depends="build-test" description="Execute unit tests with sstable compression enabled">
     <testmacro suitename="unit" inputdir="${test.unit.src}" timeout="60000">
       <jvmarg value="-Dlegacy-sstable-root=${test.data}/legacy-sstables"/>

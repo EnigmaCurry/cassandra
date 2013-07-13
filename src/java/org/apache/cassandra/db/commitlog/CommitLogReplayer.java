@@ -39,10 +39,8 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.io.util.FastByteArrayInputStream;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.PureJavaCrc32;
-import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.cassandra.utils.*;
+
 import org.cliffc.high_scale_lib.NonBlockingHashSet;
 
 public class CommitLogReplayer
@@ -50,7 +48,7 @@ public class CommitLogReplayer
     private static final Logger logger = LoggerFactory.getLogger(CommitLogReplayer.class);
     private static final int MAX_OUTSTANDING_REPLAY_COUNT = 1024;
 
-    private final Set<Table> tablesRecovered;
+    private final Set<Keyspace> keyspacesRecovered;
     private final List<Future<?>> futures;
     private final Map<UUID, AtomicInteger> invalidMutations;
     private final AtomicInteger replayedCount;
@@ -61,7 +59,7 @@ public class CommitLogReplayer
 
     public CommitLogReplayer()
     {
-        this.tablesRecovered = new NonBlockingHashSet<Table>();
+        this.keyspacesRecovered = new NonBlockingHashSet<Keyspace>();
         this.futures = new ArrayList<Future<?>>();
         this.buffer = new byte[4096];
         this.invalidMutations = new HashMap<UUID, AtomicInteger>();
@@ -72,7 +70,7 @@ public class CommitLogReplayer
         // compute per-CF and global replay positions
         cfPositions = new HashMap<UUID, ReplayPosition>();
         Ordering<ReplayPosition> replayPositionOrdering = Ordering.from(ReplayPosition.comparator);
-        Map<UUID, ReplayPosition> truncationPositions = SystemTable.getTruncationPositions();
+        Map<UUID,Pair<ReplayPosition,Long>> truncationPositions = SystemKeyspace.getTruncationRecords();
         for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
         {
             // it's important to call RP.gRP per-cf, before aggregating all the positions w/ the Ordering.min call
@@ -81,7 +79,8 @@ public class CommitLogReplayer
             ReplayPosition rp = ReplayPosition.getReplayPosition(cfs.getSSTables());
 
             // but, if we've truncted the cf in question, then we need to need to start replay after the truncation
-            ReplayPosition truncatedAt = truncationPositions.get(cfs.metadata.cfId);
+            Pair<ReplayPosition, Long> truncateRecord = truncationPositions.get(cfs.metadata.cfId);
+            ReplayPosition truncatedAt = truncateRecord == null ? null : truncateRecord.left;
             if (truncatedAt != null)
                 rp = replayPositionOrdering.max(Arrays.asList(rp, truncatedAt));
 
@@ -106,10 +105,10 @@ public class CommitLogReplayer
         FBUtilities.waitOnFutures(futures);
         logger.debug("Finished waiting on mutations from recovery");
 
-        // flush replayed tables
+        // flush replayed keyspaces
         futures.clear();
-        for (Table table : tablesRecovered)
-            futures.addAll(table.flush());
+        for (Keyspace keyspace : keyspacesRecovered)
+            futures.addAll(keyspace.flush());
         FBUtilities.waitOnFutures(futures);
         return replayedCount.get();
     }
@@ -120,7 +119,7 @@ public class CommitLogReplayer
         CommitLogDescriptor desc = CommitLogDescriptor.fromFileName(file.getName());
         final long segment = desc.id;
         int version = desc.getMessagingVersion();
-        RandomAccessReader reader = RandomAccessReader.open(new File(file.getAbsolutePath()), true);
+        RandomAccessReader reader = RandomAccessReader.open(new File(file.getAbsolutePath()));
         try
         {
             assert reader.length() <= Integer.MAX_VALUE;
@@ -162,7 +161,7 @@ public class CommitLogReplayer
                     }
 
                     // RowMutation must be at LEAST 10 bytes:
-                    // 3 each for a non-empty Table and Key (including the
+                    // 3 each for a non-empty Keyspace and Key (including the
                     // 2-byte length from writeUTF/writeWithShortLength) and 4 bytes for column count.
                     // This prevents CRC by being fooled by special-case garbage in the file; see CASSANDRA-2128
                     if (serializedSize < 10)
@@ -222,7 +221,7 @@ public class CommitLogReplayer
                 }
 
                 if (logger.isDebugEnabled())
-                    logger.debug(String.format("replaying mutation for %s.%s: %s", rm.getTable(), ByteBufferUtil.bytesToHex(rm.key()), "{" + StringUtils.join(rm.getColumnFamilies().iterator(), ", ")
+                    logger.debug(String.format("replaying mutation for %s.%s: %s", rm.getKeyspaceName(), ByteBufferUtil.bytesToHex(rm.key()), "{" + StringUtils.join(rm.getColumnFamilies().iterator(), ", ")
                             + "}"));
 
                 final long entryLocation = reader.getFilePointer();
@@ -231,17 +230,17 @@ public class CommitLogReplayer
                 {
                     public void runMayThrow() throws IOException
                     {
-                        if (Schema.instance.getKSMetaData(frm.getTable()) == null)
+                        if (Schema.instance.getKSMetaData(frm.getKeyspaceName()) == null)
                             return;
                         if (pointInTimeExceeded(frm))
                             return;
 
-                        final Table table = Table.open(frm.getTable());
-                        RowMutation newRm = new RowMutation(frm.getTable(), frm.key());
+                        final Keyspace keyspace = Keyspace.open(frm.getKeyspaceName());
 
                         // Rebuild the row mutation, omitting column families that 
                         // a) have already been flushed,
                         // b) are part of a cf that was dropped. Keep in mind that the cf.name() is suspect. do every thing based on the cfid instead.
+                        RowMutation newRm = null;
                         for (ColumnFamily columnFamily : frm.getColumnFamilies())
                         {
                             if (Schema.instance.getCF(columnFamily.id()) == null)
@@ -254,14 +253,17 @@ public class CommitLogReplayer
                             // if it is the last known segment, if we are after the replay position
                             if (segment > rp.segment || (segment == rp.segment && entryLocation > rp.position))
                             {
+                                if (newRm == null)
+                                    newRm = new RowMutation(frm.getKeyspaceName(), frm.key());
                                 newRm.add(columnFamily);
                                 replayedCount.incrementAndGet();
                             }
                         }
-                        if (!newRm.isEmpty())
+                        if (newRm != null)
                         {
-                            Table.open(newRm.getTable()).apply(newRm, false);
-                            tablesRecovered.add(table);
+                            assert !newRm.isEmpty();
+                            Keyspace.open(newRm.getKeyspaceName()).apply(newRm, false);
+                            keyspacesRecovered.add(keyspace);
                         }
                     }
                 };

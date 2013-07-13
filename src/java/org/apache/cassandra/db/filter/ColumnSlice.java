@@ -89,6 +89,12 @@ public class ColumnSlice
         return cmp.compare(start, name) <= 0 && (finish.equals(ByteBufferUtil.EMPTY_BYTE_BUFFER) || cmp.compare(finish, name) >= 0);
     }
 
+    public boolean isBefore(Comparator<ByteBuffer> cmp, ByteBuffer name)
+    {
+        return !finish.equals(ByteBufferUtil.EMPTY_BYTE_BUFFER) && cmp.compare(finish, name) < 0;
+    }
+
+
     @Override
     public final int hashCode()
     {
@@ -113,16 +119,16 @@ public class ColumnSlice
 
     public static class Serializer implements IVersionedSerializer<ColumnSlice>
     {
-        public void serialize(ColumnSlice cs, DataOutput dos, int version) throws IOException
+        public void serialize(ColumnSlice cs, DataOutput out, int version) throws IOException
         {
-            ByteBufferUtil.writeWithShortLength(cs.start, dos);
-            ByteBufferUtil.writeWithShortLength(cs.finish, dos);
+            ByteBufferUtil.writeWithShortLength(cs.start, out);
+            ByteBufferUtil.writeWithShortLength(cs.finish, out);
         }
 
-        public ColumnSlice deserialize(DataInput dis, int version) throws IOException
+        public ColumnSlice deserialize(DataInput in, int version) throws IOException
         {
-            ByteBuffer start = ByteBufferUtil.readWithShortLength(dis);
-            ByteBuffer finish = ByteBufferUtil.readWithShortLength(dis);
+            ByteBuffer start = ByteBufferUtil.readWithShortLength(in);
+            ByteBuffer finish = ByteBufferUtil.readWithShortLength(in);
             return new ColumnSlice(start, finish);
         }
 

@@ -24,14 +24,16 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+
+import com.google.common.collect.AbstractIterator;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.Allocator;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -44,45 +46,41 @@ public class Column implements OnDiskAtom
 {
     public static final int MAX_NAME_LENGTH = FBUtilities.MAX_UNSIGNED_SHORT;
 
-    private static final ColumnSerializer serializer = new ColumnSerializer();
-
-    public static ColumnSerializer serializer()
-    {
-        return serializer;
-    }
+    public static final ColumnSerializer serializer = new ColumnSerializer();
 
     public static OnDiskAtom.Serializer onDiskSerializer()
     {
         return OnDiskAtom.Serializer.instance;
     }
 
-    public static Iterator<OnDiskAtom> onDiskIterator(final DataInput dis, final int count, final ColumnSerializer.Flag flag, final int expireBefore, final Descriptor.Version version)
+    /**
+     * For 2.0-formatted sstables (where column count is not stored), @param count should be Integer.MAX_VALUE,
+     * and we will look for the end-of-row column name marker instead of relying on that.
+     */
+    public static Iterator<OnDiskAtom> onDiskIterator(final DataInput in, final int count, final ColumnSerializer.Flag flag, final int expireBefore, final Descriptor.Version version)
     {
-        return new Iterator<OnDiskAtom>()
+        return new AbstractIterator<OnDiskAtom>()
         {
             int i = 0;
 
-            public boolean hasNext()
+            protected OnDiskAtom computeNext()
             {
-                return i < count;
-            }
+                if (i++ >= count)
+                    return endOfData();
 
-            public OnDiskAtom next()
-            {
-                ++i;
+                OnDiskAtom atom;
                 try
                 {
-                    return onDiskSerializer().deserializeFromSSTable(dis, flag, expireBefore, version);
+                    atom = onDiskSerializer().deserializeFromSSTable(in, flag, expireBefore, version);
                 }
                 catch (IOException e)
                 {
                     throw new IOError(e);
                 }
-            }
+                if (atom == null)
+                    return endOfData();
 
-            public void remove()
-            {
-                throw new UnsupportedOperationException();
+                return atom;
             }
         };
     }
@@ -116,6 +114,11 @@ public class Column implements OnDiskAtom
         return new Column(newName, value, timestamp);
     }
 
+    public Column withUpdatedTimestamp(long newTimestamp)
+    {
+        return new Column(name, value, newTimestamp);
+    }
+
     public ByteBuffer name()
     {
         return name;
@@ -141,24 +144,20 @@ public class Column implements OnDiskAtom
         return timestamp;
     }
 
-    public boolean isMarkedForDelete()
+    public boolean isMarkedForDelete(long now)
     {
-        return (int) (System.currentTimeMillis() / 1000) >= getLocalDeletionTime();
+        return false;
     }
 
+    public boolean isLive(long now)
+    {
+        return !isMarkedForDelete(now);
+    }
+
+    // Don't call unless the column is actually marked for delete.
     public long getMarkedForDeleteAt()
     {
-        throw new IllegalStateException("column is not marked for delete");
-    }
-
-    public long mostRecentLiveChangeAt()
-    {
-        return timestamp;
-    }
-
-    public long mostRecentNonGCableChangeAt(int gcbefore)
-    {
-        return timestamp;
+        return Long.MAX_VALUE;
     }
 
     public int dataSize()
@@ -194,9 +193,7 @@ public class Column implements OnDiskAtom
     public Column diff(Column column)
     {
         if (timestamp() < column.timestamp())
-        {
             return column;
-        }
         return null;
     }
 
@@ -231,9 +228,9 @@ public class Column implements OnDiskAtom
     public Column reconcile(Column column, Allocator allocator)
     {
         // tombstones take precedence.  (if both are tombstones, then it doesn't matter which one we use.)
-        if (isMarkedForDelete())
+        if (isMarkedForDelete(System.currentTimeMillis()))
             return timestamp() < column.timestamp() ? column : this;
-        if (column.isMarkedForDelete())
+        if (column.isMarkedForDelete(System.currentTimeMillis()))
             return timestamp() > column.timestamp() ? this : column;
         // break ties by comparing values.
         if (timestamp() == column.timestamp())
@@ -284,17 +281,12 @@ public class Column implements OnDiskAtom
         StringBuilder sb = new StringBuilder();
         sb.append(comparator.getString(name));
         sb.append(":");
-        sb.append(isMarkedForDelete());
+        sb.append(isMarkedForDelete(System.currentTimeMillis()));
         sb.append(":");
         sb.append(value.remaining());
         sb.append("@");
         sb.append(timestamp());
         return sb.toString();
-    }
-
-    public boolean isLive()
-    {
-        return !isMarkedForDelete();
     }
 
     protected void validateName(CFMetaData metadata) throws MarshalException

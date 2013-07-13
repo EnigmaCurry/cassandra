@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.net;
 
+import java.util.concurrent.TimeUnit;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,9 +28,9 @@ public class ResponseVerbHandler implements IVerbHandler
 {
     private static final Logger logger = LoggerFactory.getLogger( ResponseVerbHandler.class );
 
-    public void doVerb(MessageIn message, String id)
+    public void doVerb(MessageIn message, int id)
     {
-        long latency = System.currentTimeMillis() - MessagingService.instance().getRegisteredCallbackAge(id);
+        long latency = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - MessagingService.instance().getRegisteredCallbackAge(id));
         CallbackInfo callbackInfo = MessagingService.instance().removeRegisteredCallback(id);
         if (callbackInfo == null)
         {
@@ -38,18 +40,9 @@ public class ResponseVerbHandler implements IVerbHandler
             return;
         }
 
-        IMessageCallback cb = callbackInfo.callback;
+        Tracing.trace("Processing response from {}", message.from);
+        IAsyncCallback cb = callbackInfo.callback;
         MessagingService.instance().maybeAddLatency(cb, message.from, latency);
-
-        if (cb instanceof IAsyncCallback)
-        {
-            Tracing.trace("Processing response from {}", message.from);
-            ((IAsyncCallback) cb).response(message);
-        }
-        else
-        {
-            Tracing.trace("Processing result from {}", message.from);
-            ((IAsyncResult) cb).result(message);
-        }
+        cb.response(message);
     }
 }

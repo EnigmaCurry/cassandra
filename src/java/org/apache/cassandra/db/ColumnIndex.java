@@ -22,28 +22,29 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.IndexHelper;
-import org.apache.cassandra.utils.AlwaysPresentFilter;
-import org.apache.cassandra.utils.IFilter;
-import org.apache.cassandra.utils.FilterFactory;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class ColumnIndex
 {
     public final List<IndexHelper.IndexInfo> columnsIndex;
-    public final IFilter bloomFilter;
 
-    private static final ColumnIndex EMPTY = new ColumnIndex(Collections.<IndexHelper.IndexInfo>emptyList(), new AlwaysPresentFilter());
+    private static final ColumnIndex EMPTY = new ColumnIndex(Collections.<IndexHelper.IndexInfo>emptyList());
 
-    private ColumnIndex(int estimatedColumnCount)
+    private ColumnIndex(List<IndexHelper.IndexInfo> columnsIndex)
     {
-        this(new ArrayList<IndexHelper.IndexInfo>(), FilterFactory.getFilter(estimatedColumnCount, 4, false));
+        assert columnsIndex != null;
+
+        this.columnsIndex = columnsIndex;
     }
 
-    private ColumnIndex(List<IndexHelper.IndexInfo> columnsIndex, IFilter bloomFilter)
+    @VisibleForTesting
+    public static ColumnIndex nothing()
     {
-        this.columnsIndex = columnsIndex;
-        this.bloomFilter = bloomFilter;
+        return EMPTY;
     }
 
     /**
@@ -65,14 +66,21 @@ public class ColumnIndex
         private final DataOutput output;
         private final RangeTombstone.Tracker tombstoneTracker;
         private int atomCount;
+        private final ByteBuffer key;
+        private final DeletionInfo deletionInfo;
 
         public Builder(ColumnFamily cf,
                        ByteBuffer key,
-                       int estimatedColumnCount,
                        DataOutput output)
         {
-            this.indexOffset = rowHeaderSize(key, cf.deletionInfo());
-            this.result = new ColumnIndex(estimatedColumnCount);
+            assert cf != null;
+            assert key != null;
+            assert output != null;
+
+            this.key = key;
+            deletionInfo = cf.deletionInfo();
+            this.indexOffset = rowHeaderSize(key, deletionInfo);
+            this.result = new ColumnIndex(new ArrayList<IndexHelper.IndexInfo>());
             this.output = output;
             this.tombstoneTracker = new RangeTombstone.Tracker(cf.getComparator());
         }
@@ -87,9 +95,7 @@ public class ColumnIndex
             // TODO fix constantSize when changing the nativeconststs.
             int keysize = key.remaining();
             return typeSizes.sizeof((short) keysize) + keysize          // Row key
-                 + typeSizes.sizeof(0L)                                 // Row data size
-                 + DeletionTime.serializer.serializedSize(delInfo.getTopLevelDeletion(), typeSizes)
-                 + typeSizes.sizeof(0);                                 // Column count
+                 + DeletionTime.serializer.serializedSize(delInfo.getTopLevelDeletion(), typeSizes);
         }
 
         public RangeTombstone.Tracker tombstoneTracker()
@@ -112,6 +118,7 @@ public class ColumnIndex
          */
         public ColumnIndex build(ColumnFamily cf) throws IOException
         {
+            // cf has disentangled the columns and range tombstones, we need to re-interleave them in comparator order
             Iterator<RangeTombstone> rangeIter = cf.deletionInfo().rangeIterator();
             RangeTombstone tombstone = rangeIter.hasNext() ? rangeIter.next() : null;
             Comparator<ByteBuffer> comparator = cf.getComparator();
@@ -131,33 +138,36 @@ public class ColumnIndex
                 add(tombstone);
                 tombstone = rangeIter.hasNext() ? rangeIter.next() : null;
             }
-            return build();
+            ColumnIndex index = build();
+
+            finish();
+
+            return index;
         }
 
         public ColumnIndex build(Iterable<OnDiskAtom> columns) throws IOException
         {
             for (OnDiskAtom c : columns)
                 add(c);
+            ColumnIndex index = build();
 
-            return build();
+            finish();
+
+            return index;
         }
 
         public void add(OnDiskAtom column) throws IOException
         {
             atomCount++;
 
-            if (column instanceof Column)
-                result.bloomFilter.add(column.name());
-
             if (firstColumn == null)
             {
                 firstColumn = column;
                 startPosition = endPosition;
-                // TODO: have that use the firstColumn as min + make sure we
-                // optimize that on read
+                // TODO: have that use the firstColumn as min + make sure we optimize that on read
                 endPosition += tombstoneTracker.writeOpenedMarker(firstColumn, output, atomSerializer);
                 blockSize = 0; // We don't count repeated tombstone marker in the block size, to avoid a situation
-                               // where we wouldn't make any problem because a block is filled by said marker
+                               // where we wouldn't make any progress because a block is filled by said marker
             }
 
             long size = column.serializedSizeForSSTable();
@@ -173,13 +183,22 @@ public class ColumnIndex
                 lastBlockClosing = column;
             }
 
-            if (output != null)
-                atomSerializer.serializeForSSTable(column, output);
+            maybeWriteRowHeader();
+            atomSerializer.serializeForSSTable(column, output);
 
             // TODO: Should deal with removing unneeded tombstones
             tombstoneTracker.update(column);
 
             lastColumn = column;
+        }
+
+        private void maybeWriteRowHeader() throws IOException
+        {
+            if (lastColumn == null)
+            {
+                ByteBufferUtil.writeWithShortLength(key, output);
+                DeletionTime.serializer.serialize(deletionInfo.getTopLevelDeletion(), output);
+            }
         }
 
         public ColumnIndex build()
@@ -198,6 +217,12 @@ public class ColumnIndex
             // we should always have at least one computed index block, but we only write it out if there is more than that.
             assert result.columnsIndex.size() > 0;
             return result;
+        }
+
+        public void finish() throws IOException
+        {
+            if (!deletionInfo.isLive())
+                maybeWriteRowHeader();
         }
     }
 }

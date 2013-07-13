@@ -63,8 +63,6 @@ public abstract class SSTable
     public static final String COMPONENT_FILTER = Component.Type.FILTER.repr;
     public static final String COMPONENT_STATS = Component.Type.STATS.repr;
     public static final String COMPONENT_DIGEST = Component.Type.DIGEST.repr;
-    public static final String COMPONENT_CRC = Component.Type.CRC.repr;
-    public static final String COMPONENT_SUMMARY = Component.Type.SUMMARY.repr;
 
     public static final String TEMPFILE_MARKER = "tmp";
 
@@ -182,7 +180,7 @@ public abstract class SSTable
         return descriptor.cfname;
     }
 
-    public String getTableName()
+    public String getKeyspaceName()
     {
         return descriptor.ksname;
     }
@@ -192,7 +190,16 @@ public abstract class SSTable
      */
     public static Pair<Descriptor,Component> tryComponentFromFilename(File dir, String name)
     {
-        return Component.fromFilename(dir, name);
+        try
+        {
+            return Component.fromFilename(dir, name);
+        }
+        catch (NoSuchElementException e)
+        {
+            // A NoSuchElementException is thrown if the name does not match the Descriptor format
+            // This is the less impacting change (all calls to this method test for null return)
+            return null;
+        }
     }
 
     /**
@@ -246,7 +253,7 @@ public abstract class SSTable
         while (ifile.getFilePointer() < BYTES_CAP && keys < SAMPLES_CAP)
         {
             ByteBufferUtil.skipShortLength(ifile);
-            RowIndexEntry.serializer.skip(ifile, descriptor.version);
+            RowIndexEntry.serializer.skip(ifile);
             keys++;
         }
         assert keys > 0 && ifile.getFilePointer() > 0 && ifile.length() > 0 : "Unexpected empty index file: " + ifile;

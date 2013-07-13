@@ -102,6 +102,13 @@ public abstract class CBUtil
         return cb;
     }
 
+    public static ChannelBuffer byteToCB(byte b)
+    {
+        ChannelBuffer cb = ChannelBuffers.buffer(1);
+        cb.writeByte(b);
+        return cb;
+    }
+
     public static ChannelBuffer intToCB(int i)
     {
         ChannelBuffer cb = ChannelBuffers.buffer(4);
@@ -241,6 +248,14 @@ public abstract class CBUtil
             cb.writeBytes(stringToCB(entry.getKey()));
             writeStringList(cb, entry.getValue());
         }
+    }
+
+    public static ChannelBuffer valueToCB(byte[] bytes)
+    {
+        if (bytes == null || bytes.length == 0)
+            return intToCB(0);
+
+        return ChannelBuffers.wrappedBuffer(intToCB(bytes.length), ChannelBuffers.wrappedBuffer(bytes));
     }
 
     public static ByteBuffer readValue(ChannelBuffer cb)

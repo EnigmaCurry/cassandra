@@ -22,9 +22,9 @@ import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.io.ISSTableSerializer;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public interface OnDiskAtom
@@ -51,35 +51,38 @@ public interface OnDiskAtom
 
         private Serializer() {}
 
-        public void serializeForSSTable(OnDiskAtom atom, DataOutput dos) throws IOException
+        public void serializeForSSTable(OnDiskAtom atom, DataOutput out) throws IOException
         {
             if (atom instanceof Column)
             {
-                Column.serializer().serialize((Column)atom, dos);
+                Column.serializer.serialize((Column) atom, out);
             }
             else
             {
                 assert atom instanceof RangeTombstone;
-                RangeTombstone.serializer.serializeForSSTable((RangeTombstone)atom, dos);
+                RangeTombstone.serializer.serializeForSSTable((RangeTombstone)atom, out);
             }
         }
 
-        public OnDiskAtom deserializeFromSSTable(DataInput dis, Descriptor.Version version) throws IOException
+        public OnDiskAtom deserializeFromSSTable(DataInput in, Descriptor.Version version) throws IOException
         {
-            return deserializeFromSSTable(dis, ColumnSerializer.Flag.LOCAL, (int)(System.currentTimeMillis() / 1000), version);
+            return deserializeFromSSTable(in, ColumnSerializer.Flag.LOCAL, Integer.MIN_VALUE, version);
         }
 
-        public OnDiskAtom deserializeFromSSTable(DataInput dis, ColumnSerializer.Flag flag, int expireBefore, Descriptor.Version version) throws IOException
+        public OnDiskAtom deserializeFromSSTable(DataInput in, ColumnSerializer.Flag flag, int expireBefore, Descriptor.Version version) throws IOException
         {
-            ByteBuffer name = ByteBufferUtil.readWithShortLength(dis);
+            ByteBuffer name = ByteBufferUtil.readWithShortLength(in);
             if (name.remaining() <= 0)
-                throw ColumnSerializer.CorruptColumnException.create(dis, name);
+            {
+                // SSTableWriter.END_OF_ROW
+                return null;
+            }
 
-            int b = dis.readUnsignedByte();
+            int b = in.readUnsignedByte();
             if ((b & ColumnSerializer.RANGE_TOMBSTONE_MASK) != 0)
-                return RangeTombstone.serializer.deserializeBody(dis, name, version);
+                return RangeTombstone.serializer.deserializeBody(in, name, version);
             else
-                return Column.serializer().deserializeColumnBody(dis, name, b, flag, expireBefore);
+                return Column.serializer.deserializeColumnBody(in, name, b, flag, expireBefore);
         }
     }
 }

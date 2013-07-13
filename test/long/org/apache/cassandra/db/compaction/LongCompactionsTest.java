@@ -19,12 +19,11 @@
 package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
@@ -39,7 +38,7 @@ import static junit.framework.Assert.assertEquals;
 
 public class LongCompactionsTest extends SchemaLoader
 {
-    public static final String TABLE1 = "Keyspace1";
+    public static final String KEYSPACE1 = "Keyspace1";
 
     /**
      * Test compaction with a very wide row.
@@ -72,8 +71,8 @@ public class LongCompactionsTest extends SchemaLoader
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard1");
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
 
         ArrayList<SSTableReader> sstables = new ArrayList<SSTableReader>();
         for (int k = 0; k < sstableCount; k++)
@@ -98,23 +97,23 @@ public class LongCompactionsTest extends SchemaLoader
         // give garbage collection a bit of time to catch up
         Thread.sleep(1000);
 
-        long start = System.currentTimeMillis();
-        final int gcBefore = (int) (System.currentTimeMillis() / 1000) - Schema.instance.getCFMetaData(TABLE1, "Standard1").getGcGraceSeconds();
+        long start = System.nanoTime();
+        final int gcBefore = (int) (System.currentTimeMillis() / 1000) - Schema.instance.getCFMetaData(KEYSPACE1, "Standard1").getGcGraceSeconds();
         new CompactionTask(store, sstables, gcBefore).execute(null);
         System.out.println(String.format("%s: sstables=%d rowsper=%d colsper=%d: %d ms",
                                          this.getClass().getName(),
                                          sstableCount,
                                          rowsPerSSTable,
                                          colsPerRow,
-                                         System.currentTimeMillis() - start));
+                                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
     }
 
     @Test
     public void testStandardColumnCompactions() throws IOException, ExecutionException, InterruptedException
     {
         // this test does enough rows to force multiple block indexes to be used
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
         cfs.clearUnsafe();
 
         final int ROWS_PER_SSTABLE = 10;
@@ -128,7 +127,7 @@ public class LongCompactionsTest extends SchemaLoader
         for (int j = 0; j < SSTABLES; j++) {
             for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
                 DecoratedKey key = Util.dk(String.valueOf(i % 2));
-                RowMutation rm = new RowMutation(TABLE1, key.key);
+                RowMutation rm = new RowMutation(KEYSPACE1, key.key);
                 long timestamp = j * ROWS_PER_SSTABLE + i;
                 rm.add("Standard1", ByteBufferUtil.bytes(String.valueOf(i / 2)),
                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
@@ -148,7 +147,7 @@ public class LongCompactionsTest extends SchemaLoader
 
         // make sure max timestamp of compacted sstables is recorded properly after compaction.
         CompactionsTest.assertMaxTimestamp(cfs, maxTimestampExpected);
-        cfs.truncate();
+        cfs.truncateBlocking();
     }
 
     private void forceCompactions(ColumnFamilyStore cfs) throws ExecutionException, InterruptedException

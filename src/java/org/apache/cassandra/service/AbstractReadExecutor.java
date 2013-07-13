@@ -17,31 +17,30 @@
  */
 package org.apache.cassandra.service;
 
-import java.io.IOException;
 import java.net.InetAddress;
-import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.config.ReadRepairDecision;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadResponse;
 import org.apache.cassandra.db.Row;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.exceptions.ReadTimeoutException;
 import org.apache.cassandra.exceptions.UnavailableException;
+import org.apache.cassandra.metrics.ReadRepairMetrics;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageProxy.LocalReadRunnable;
 import org.apache.cassandra.utils.FBUtilities;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.common.primitives.Longs;
 
 public abstract class AbstractReadExecutor
 {
@@ -62,7 +61,7 @@ public abstract class AbstractReadExecutor
     {
         unfiltered = allReplicas;
         this.endpoints = queryTargets;
-        this.resolver = new RowDigestResolver(command.table, command.key);
+        this.resolver = new RowDigestResolver(command.ksName, command.key);
         this.handler = new ReadCallback<ReadResponse, Row>(resolver, consistency_level, command, this.endpoints);
         this.command = command;
         this.cfs = cfs;
@@ -118,19 +117,33 @@ public abstract class AbstractReadExecutor
         // noop by default.
     }
 
-    Row get() throws ReadTimeoutException, DigestMismatchException, IOException
+    Row get() throws ReadTimeoutException, DigestMismatchException
     {
         return handler.get();
     }
 
     public static AbstractReadExecutor getReadExecutor(ReadCommand command, ConsistencyLevel consistency_level) throws UnavailableException
     {
-        Table table = Table.open(command.table);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(command.cfName);
-        List<InetAddress> allReplicas = StorageProxy.getLiveSortedEndpoints(table, command.key);
-        List<InetAddress> queryTargets = consistency_level.filterForQuery(table, allReplicas, cfs.metadata.newReadRepairDecision());
+        Keyspace keyspace = Keyspace.open(command.ksName);
+        List<InetAddress> allReplicas = StorageProxy.getLiveSortedEndpoints(keyspace, command.key);
+        CFMetaData metaData = Schema.instance.getCFMetaData(command.ksName, command.cfName);
 
-        switch (cfs.metadata.getSpeculativeRetry().type)
+        ReadRepairDecision rrDecision = metaData.newReadRepairDecision();
+         
+        if (rrDecision != ReadRepairDecision.NONE) {
+            ReadRepairMetrics.attempted.mark();
+        }
+
+        List<InetAddress> queryTargets = consistency_level.filterForQuery(keyspace, allReplicas, rrDecision);
+
+        if (StorageService.instance.isClientMode())
+        {
+            return new DefaultReadExecutor(null, command, consistency_level, allReplicas, queryTargets);
+        }
+
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(command.cfName);
+
+        switch (metaData.getSpeculativeRetry().type)
         {
             case ALWAYS:
                 return new SpeculateAlwaysExecutor(cfs, command, consistency_level, allReplicas, queryTargets);
@@ -164,10 +177,10 @@ public abstract class AbstractReadExecutor
         void speculate()
         {
             // no latency information, or we're overloaded
-            if (cfs.sampleLatency > command.getTimeout())
+            if (cfs.sampleLatency > TimeUnit.MILLISECONDS.toNanos(command.getTimeout()))
                 return;
 
-            if (!handler.await(cfs.sampleLatency))
+            if (!handler.await(cfs.sampleLatency, TimeUnit.NANOSECONDS))
             {
                 InetAddress endpoint = unfiltered.get(handler.endpoints.size());
 

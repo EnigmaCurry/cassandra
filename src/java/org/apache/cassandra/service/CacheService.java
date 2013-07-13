@@ -33,8 +33,6 @@ import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import com.google.common.util.concurrent.Futures;
-import com.googlecode.concurrentlinkedhashmap.EntryWeigher;
-import org.github.jamm.MemoryMeter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -102,7 +100,6 @@ public class CacheService implements CacheServiceMBean
     }
 
     /**
-     * We can use Weighers.singleton() because Long can't be leaking memory
      * @return auto saving cache object
      */
     private AutoSavingCache<KeyCacheKey, RowIndexEntry> initKeyCache()
@@ -114,24 +111,7 @@ public class CacheService implements CacheServiceMBean
         // as values are constant size we can use singleton weigher
         // where 48 = 40 bytes (average size of the key) + 8 bytes (size of value)
         ICache<KeyCacheKey, RowIndexEntry> kc;
-        if (MemoryMeter.isInitialized())
-        {
-            kc = ConcurrentLinkedHashCache.create(keyCacheInMemoryCapacity);
-        }
-        else
-        {
-            logger.warn("MemoryMeter uninitialized (jamm not specified as java agent); KeyCache size in JVM Heap will not be calculated accurately. " +
-                        "Usually this means cassandra-env.sh disabled jamm because you are using a buggy JRE; upgrade to the Sun JRE instead");
-            /* We don't know the overhead size because memory meter is not enabled. */
-            EntryWeigher<KeyCacheKey, RowIndexEntry> weigher = new EntryWeigher<KeyCacheKey, RowIndexEntry>()
-            {
-                public int weightOf(KeyCacheKey key, RowIndexEntry entry)
-                {
-                    return key.key.length + entry.serializedSize();
-                }
-            };
-            kc = ConcurrentLinkedHashCache.create(keyCacheInMemoryCapacity, weigher);
-        }
+        kc = ConcurrentLinkedHashCache.create(keyCacheInMemoryCapacity);
         AutoSavingCache<KeyCacheKey, RowIndexEntry> keyCache = new AutoSavingCache<KeyCacheKey, RowIndexEntry>(kc, CacheType.KEY_CACHE, new KeyCacheSerializer());
 
         int keyCacheKeysToSave = DatabaseDescriptor.getKeyCacheKeysToSave();
@@ -150,14 +130,12 @@ public class CacheService implements CacheServiceMBean
      */
     private AutoSavingCache<RowCacheKey, IRowCacheEntry> initRowCache()
     {
-        logger.info("Initializing row cache with capacity of {} MBs and provider {}",
-                    DatabaseDescriptor.getRowCacheSizeInMB(),
-                    DatabaseDescriptor.getRowCacheProvider().getClass().getName());
+        logger.info("Initializing row cache with capacity of {} MBs", DatabaseDescriptor.getRowCacheSizeInMB());
 
         long rowCacheInMemoryCapacity = DatabaseDescriptor.getRowCacheSizeInMB() * 1024 * 1024;
 
         // cache object
-        ICache<RowCacheKey, IRowCacheEntry> rc = DatabaseDescriptor.getRowCacheProvider().create(rowCacheInMemoryCapacity);
+        ICache<RowCacheKey, IRowCacheEntry> rc = new SerializingCacheProvider().create(rowCacheInMemoryCapacity);
         AutoSavingCache<RowCacheKey, IRowCacheEntry> rowCache = new AutoSavingCache<RowCacheKey, IRowCacheEntry>(rc, CacheType.ROW_CACHE, new RowCacheSerializer());
 
         int rowCacheKeysToSave = DatabaseDescriptor.getRowCacheKeysToSave();
@@ -272,8 +250,7 @@ public class CacheService implements CacheServiceMBean
         if (capacity < 0)
             throw new RuntimeException("capacity should not be negative.");
 
-        long weightedCapacity = capacity * 1024 * 1024;
-        keyCache.setCapacity(MemoryMeter.isInitialized() ? weightedCapacity : (weightedCapacity / 48));
+        keyCache.setCapacity(capacity * 1024 * 1024);
     }
 
     public long getRowCacheSize()
@@ -294,22 +271,6 @@ public class CacheService implements CacheServiceMBean
     public long getKeyCacheEntries()
     {
         return keyCache.size();
-    }
-
-    public void reduceCacheSizes()
-    {
-        reduceRowCacheSize();
-        reduceKeyCacheSize();
-    }
-
-    public void reduceRowCacheSize()
-    {
-        rowCache.reduceCacheSize();
-    }
-
-    public void reduceKeyCacheSize()
-    {
-        keyCache.reduceCacheSize();
     }
 
     public void saveCaches() throws ExecutionException, InterruptedException
@@ -339,7 +300,7 @@ public class CacheService implements CacheServiceMBean
                 public Pair<RowCacheKey, IRowCacheEntry> call() throws Exception
                 {
                     DecoratedKey key = cfs.partitioner.decorateKey(buffer);
-                    ColumnFamily data = cfs.getTopLevelColumns(QueryFilter.getIdentityFilter(key, cfs.name), Integer.MIN_VALUE, true);
+                    ColumnFamily data = cfs.getTopLevelColumns(QueryFilter.getIdentityFilter(key, cfs.name, Long.MIN_VALUE), Integer.MIN_VALUE);
                     return Pair.create(new RowCacheKey(cfs.metadata.cfId, key), (IRowCacheEntry) data);
                 }
             });
@@ -350,8 +311,9 @@ public class CacheService implements CacheServiceMBean
             for (ByteBuffer key : buffers)
             {
                 DecoratedKey dk = cfs.partitioner.decorateKey(key);
-                ColumnFamily data = cfs.getTopLevelColumns(QueryFilter.getIdentityFilter(dk, cfs.name), Integer.MIN_VALUE, true);
-                rowCache.put(new RowCacheKey(cfs.metadata.cfId, dk), data);
+                ColumnFamily data = cfs.getTopLevelColumns(QueryFilter.getIdentityFilter(dk, cfs.name, Long.MIN_VALUE), Integer.MIN_VALUE);
+                if (data != null)
+                    rowCache.put(new RowCacheKey(cfs.metadata.cfId, dk), data);
             }
         }
     }
@@ -366,9 +328,7 @@ public class CacheService implements CacheServiceMBean
             ByteBufferUtil.writeWithLength(key.key, out);
             Descriptor desc = key.desc;
             out.writeInt(desc.generation);
-            out.writeBoolean(desc.version.hasPromotedIndexes);
-            if (!desc.version.hasPromotedIndexes)
-                return;
+            out.writeBoolean(true);
             RowIndexEntry.serializer.serialize(entry, out);
         }
 
@@ -377,16 +337,13 @@ public class CacheService implements CacheServiceMBean
             ByteBuffer key = ByteBufferUtil.readWithLength(input);
             int generation = input.readInt();
             SSTableReader reader = findDesc(generation, cfs.getSSTables());
+            input.readBoolean(); // backwards compatibility for "promoted indexes" boolean
             if (reader == null)
             {
                 RowIndexEntry.serializer.skipPromotedIndex(input);
                 return null;
             }
-            RowIndexEntry entry;
-            if (input.readBoolean())
-                entry = RowIndexEntry.serializer.deserialize(input, reader.descriptor.version);
-            else
-                entry = reader.getPosition(reader.partitioner.decorateKey(key), Operator.EQ);
+            RowIndexEntry entry = RowIndexEntry.serializer.deserialize(input, reader.descriptor.version);
             return Futures.immediateFuture(Pair.create(new KeyCacheKey(reader.descriptor, key), entry));
         }
 

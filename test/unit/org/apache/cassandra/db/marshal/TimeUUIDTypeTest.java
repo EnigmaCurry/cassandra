@@ -18,13 +18,13 @@
 */
 package org.apache.cassandra.db.marshal;
 
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.UUID;
 
+import org.apache.cassandra.serializers.MarshalException;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 

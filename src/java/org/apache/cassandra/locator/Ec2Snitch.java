@@ -29,7 +29,7 @@ import com.google.common.base.Charsets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.SystemTable;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.EndpointState;
@@ -98,7 +98,7 @@ public class Ec2Snitch extends AbstractNetworkTopologySnitch
         if (state == null || state.getApplicationState(ApplicationState.RACK) == null)
         {
             if (savedEndpoints == null)
-                savedEndpoints = SystemTable.loadDcRackInfo();
+                savedEndpoints = SystemKeyspace.loadDcRackInfo();
             if (savedEndpoints.containsKey(endpoint))
                 return savedEndpoints.get(endpoint).get("rack");
             return DEFAULT_RACK;
@@ -114,7 +114,7 @@ public class Ec2Snitch extends AbstractNetworkTopologySnitch
         if (state == null || state.getApplicationState(ApplicationState.DC) == null)
         {
             if (savedEndpoints == null)
-                savedEndpoints = SystemTable.loadDcRackInfo();
+                savedEndpoints = SystemKeyspace.loadDcRackInfo();
             if (savedEndpoints.containsKey(endpoint))
                 return savedEndpoints.get(endpoint).get("data_center");
             return DEFAULT_DC;

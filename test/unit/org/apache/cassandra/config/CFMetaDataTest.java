@@ -18,22 +18,15 @@
  */
 package org.apache.cassandra.config;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.HashMap;
-import java.util.Map;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.Row;
-import org.apache.cassandra.db.RowMutation;
-import org.apache.cassandra.db.SystemTable;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.io.compress.*;
@@ -66,7 +59,7 @@ public class CFMetaDataTest extends SchemaLoader
     }
 
     @Test
-    public void testThriftToAvroConversion() throws Exception
+    public void testThriftConversion() throws Exception
     {
         CfDef cfDef = new CfDef().setDefault_validation_class(AsciiType.class.getCanonicalName())
                                  .setComment("Test comment")
@@ -77,7 +70,6 @@ public class CFMetaDataTest extends SchemaLoader
         // convert Thrift to CFMetaData
         CFMetaData cfMetaData = CFMetaData.fromThrift(cfDef);
 
-        // make a correct Avro object
         CfDef thriftCfDef = new CfDef();
         thriftCfDef.keyspace = KEYSPACE;
         thriftCfDef.name = COLUMN_FAMILY;
@@ -106,9 +98,9 @@ public class CFMetaDataTest extends SchemaLoader
     @Test
     public void testConversionsInverses() throws Exception
     {
-        for (String table : Schema.instance.getNonSystemTables())
+        for (String keyspaceName : Schema.instance.getNonSystemKeyspaces())
         {
-            for (ColumnFamilyStore cfs : Table.open(table).getColumnFamilyStores())
+            for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
             {
                 CFMetaData cfm = cfs.metadata;
                 checkInverses(cfm);
@@ -121,29 +113,37 @@ public class CFMetaDataTest extends SchemaLoader
         }
     }
 
+    private static CFMetaData withoutThriftIncompatible(CFMetaData cfm)
+    {
+        CFMetaData result = cfm.clone();
+
+        // This is a nasty hack to work around the fact that in thrift we exposes:
+        //   - neither definition with a non-nulll componentIndex
+        //   - nor non REGULAR definitions.
+        Iterator<ColumnDefinition> iter = result.allColumns().iterator();
+        while (iter.hasNext())
+        {
+            ColumnDefinition def = iter.next();
+            // Remove what we know is not thrift compatible
+            if (!def.isThriftCompatible())
+                iter.remove();
+        }
+        return result;
+    }
+
     private void checkInverses(CFMetaData cfm) throws Exception
     {
         DecoratedKey k = StorageService.getPartitioner().decorateKey(ByteBufferUtil.bytes(cfm.ksName));
 
-        // This is a nasty hack to work around the fact that non-null componentIndex 
-        // are only used by CQL (so far) so we don't expose them through thrift
-        // There is a CFM with componentIndex defined in Keyspace2 which is used by 
-        // ColumnFamilyStoreTest to verify index repair (CASSANDRA-2897)
-        for (Map.Entry<ByteBuffer, ColumnDefinition> cMeta: cfm.column_metadata.entrySet())
-        {
-            // Non-null componentIndex are only used by CQL (so far) so we don't expose
-            // them through thrift
-            if (cMeta.getValue().componentIndex != null)
-                cfm.column_metadata.remove(cMeta.getKey());
-        }
-
         // Test thrift conversion
-        assert cfm.equals(CFMetaData.fromThrift(cfm.toThrift())) : String.format("\n%s\n!=\n%s", cfm, CFMetaData.fromThrift(cfm.toThrift()));
+        CFMetaData before = withoutThriftIncompatible(cfm);
+        CFMetaData after = withoutThriftIncompatible(CFMetaData.fromThrift(before.toThrift()));
+        assert before.equals(after) : String.format("\n%s\n!=\n%s", before, after);
 
         // Test schema conversion
         RowMutation rm = cfm.toSchema(System.currentTimeMillis());
-        ColumnFamily serializedCf = rm.getColumnFamily(Schema.instance.getId(Table.SYSTEM_KS, SystemTable.SCHEMA_COLUMNFAMILIES_CF));
-        ColumnFamily serializedCD = rm.getColumnFamily(Schema.instance.getId(Table.SYSTEM_KS, SystemTable.SCHEMA_COLUMNS_CF));
+        ColumnFamily serializedCf = rm.getColumnFamily(Schema.instance.getId(Keyspace.SYSTEM_KS, SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF));
+        ColumnFamily serializedCD = rm.getColumnFamily(Schema.instance.getId(Keyspace.SYSTEM_KS, SystemKeyspace.SCHEMA_COLUMNS_CF));
         UntypedResultSet.Row result = QueryProcessor.resultify("SELECT * FROM system.schema_columnfamilies", new Row(k, serializedCf)).one();
         CFMetaData newCfm = CFMetaData.addColumnDefinitionSchema(CFMetaData.fromSchemaNoColumns(result), new Row(k, serializedCD));
         assert cfm.equals(newCfm) : String.format("\n%s\n!=\n%s", cfm, newCfm);

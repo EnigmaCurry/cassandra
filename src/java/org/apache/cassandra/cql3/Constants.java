@@ -18,22 +18,19 @@
 package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
-import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 
-import com.google.common.base.Objects;
+import org.apache.cassandra.serializers.MarshalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CounterColumnType;
 import org.apache.cassandra.db.marshal.LongType;
-import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.db.marshal.ReversedType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -48,6 +45,38 @@ public abstract class Constants
     {
         STRING, INTEGER, UUID, FLOAT, BOOLEAN, HEX;
     }
+
+    public static final Term.Raw NULL_LITERAL = new Term.Raw()
+    {
+        private final Term.Terminal NULL_VALUE = new Value(null)
+        {
+            @Override
+            public Terminal bind(List<ByteBuffer> values)
+            {
+                // We return null because that makes life easier for collections
+                return null;
+            }
+        };
+
+        public Term prepare(ColumnSpecification receiver) throws InvalidRequestException
+        {
+            if (!isAssignableTo(receiver))
+                throw new InvalidRequestException("Invalid null value for counter increment/decrement");
+
+            return NULL_VALUE;
+        }
+
+        public boolean isAssignableTo(ColumnSpecification receiver)
+        {
+            return !(receiver.type instanceof CounterColumnType);
+        }
+
+        @Override
+        public String toString()
+        {
+            return null;
+        }
+    };
 
     public static class Literal implements Term.Raw
     {
@@ -101,6 +130,8 @@ public abstract class Constants
 
         private ByteBuffer parsedValue(AbstractType<?> validator) throws InvalidRequestException
         {
+            if (validator instanceof ReversedType<?>)
+                validator = ((ReversedType<?>) validator).baseType;
             try
             {
                 // BytesType doesn't want it's input prefixed by '0x'.
@@ -239,7 +270,8 @@ public abstract class Constants
             try
             {
                 ByteBuffer value = values.get(bindIndex);
-                receiver.type.validate(value);
+                if (value != null)
+                    receiver.type.validate(value);
                 return value;
             }
             catch (MarshalException e)
@@ -250,7 +282,8 @@ public abstract class Constants
 
         public Value bind(List<ByteBuffer> values) throws InvalidRequestException
         {
-            return new Constants.Value(bindAndGet(values));
+            ByteBuffer bytes = bindAndGet(values);
+            return bytes == null ? null : new Constants.Value(bytes);
         }
     }
 
@@ -264,7 +297,8 @@ public abstract class Constants
         public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
         {
             ByteBuffer cname = columnName == null ? prefix.build() : prefix.add(columnName.key).build();
-            cf.addColumn(params.makeColumn(cname, t.bindAndGet(params.variables)));
+            ByteBuffer value = t.bindAndGet(params.variables);
+            cf.addColumn(value == null ? params.makeTombstone(cname) : params.makeColumn(cname, value));
         }
     }
 
@@ -277,7 +311,10 @@ public abstract class Constants
 
         public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
         {
-            long increment = ByteBufferUtil.toLong(t.bindAndGet(params.variables));
+            ByteBuffer bytes = t.bindAndGet(params.variables);
+            if (bytes == null)
+                throw new InvalidRequestException("Invalid null value for counter increment");
+            long increment = ByteBufferUtil.toLong(bytes);
             ByteBuffer cname = columnName == null ? prefix.build() : prefix.add(columnName.key).build();
             cf.addCounter(cname, increment);
         }
@@ -292,7 +329,11 @@ public abstract class Constants
 
         public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
         {
-            long increment = ByteBufferUtil.toLong(t.bindAndGet(params.variables));
+            ByteBuffer bytes = t.bindAndGet(params.variables);
+            if (bytes == null)
+                throw new InvalidRequestException("Invalid null value for counter increment");
+
+            long increment = ByteBufferUtil.toLong(bytes);
             if (increment == Long.MIN_VALUE)
                 throw new InvalidRequestException("The negation of " + increment + " overflows supported counter precision (signed 8 bytes integer)");
 

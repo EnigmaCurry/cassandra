@@ -33,6 +33,7 @@ import org.apache.cassandra.thrift.CqlResult;
 import org.apache.cassandra.thrift.CqlResultType;
 import org.apache.cassandra.thrift.CqlRow;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.service.pager.PagingState;
 
 public class ResultSet
 {
@@ -47,7 +48,7 @@ public class ResultSet
         this(new Metadata(metadata), new ArrayList<List<ByteBuffer>>());
     }
 
-    private ResultSet(Metadata metadata, List<List<ByteBuffer>> rows)
+    public ResultSet(Metadata metadata, List<List<ByteBuffer>> rows)
     {
         this.metadata = metadata;
         this.rows = rows;
@@ -60,14 +61,14 @@ public class ResultSet
 
     public void addRow(List<ByteBuffer> row)
     {
-        assert row.size() == metadata.names.size();
+        assert row.size() == metadata.columnCount;
         rows.add(row);
     }
 
     public void addColumnValue(ByteBuffer value)
     {
-        if (rows.isEmpty() || lastRow().size() == metadata.names.size())
-            rows.add(new ArrayList<ByteBuffer>(metadata.names.size()));
+        if (rows.isEmpty() || lastRow().size() == metadata.columnCount)
+            rows.add(new ArrayList<ByteBuffer>(metadata.columnCount));
 
         lastRow().add(value);
     }
@@ -92,21 +93,28 @@ public class ResultSet
         }
     }
 
-    public ResultSet makeCountResult()
+    public ResultSet makeCountResult(ColumnIdentifier alias)
     {
+        assert metadata.names != null;
         String ksName = metadata.names.get(0).ksName;
         String cfName = metadata.names.get(0).cfName;
-        metadata.names.clear();
-        metadata.names.add(new ColumnSpecification(ksName, cfName, COUNT_COLUMN, LongType.instance));
-
         long count = rows.size();
-        rows.clear();
-        rows.add(Collections.singletonList(ByteBufferUtil.bytes(count)));
-        return this;
+        return makeCountResult(ksName, cfName, count, alias);
+    }
+
+    public static ResultSet makeCountResult(String ksName, String cfName, long count, ColumnIdentifier alias)
+    {
+        ColumnSpecification spec = new ColumnSpecification(ksName, cfName, alias == null ? COUNT_COLUMN : alias, LongType.instance);
+        Metadata newMetadata = new Metadata(Collections.singletonList(spec));
+        List<List<ByteBuffer>> newRows = Collections.singletonList(Collections.singletonList(ByteBufferUtil.bytes(count)));
+
+        return new ResultSet(newMetadata, newRows);
     }
 
     public CqlResult toThriftResult()
     {
+        assert metadata.names != null;
+
         String UTF8 = "UTF8Type";
         CqlMetadata schema = new CqlMetadata(new HashMap<ByteBuffer, String>(),
                 new HashMap<ByteBuffer, String>(),
@@ -176,24 +184,24 @@ public class ResultSet
          *   - rows count (4 bytes)
          *   - rows
          */
-        public ResultSet decode(ChannelBuffer body)
+        public ResultSet decode(ChannelBuffer body, int version)
         {
-            Metadata m = Metadata.codec.decode(body);
+            Metadata m = Metadata.codec.decode(body, version);
             int rowCount = body.readInt();
             ResultSet rs = new ResultSet(m, new ArrayList<List<ByteBuffer>>(rowCount));
 
             // rows
-            int totalValues = rowCount * m.names.size();
+            int totalValues = rowCount * m.columnCount;
             for (int i = 0; i < totalValues; i++)
                 rs.addColumnValue(CBUtil.readValue(body));
 
             return rs;
         }
 
-        public ChannelBuffer encode(ResultSet rs)
+        public ChannelBuffer encode(ResultSet rs, int version)
         {
-            CBUtil.BufferBuilder builder = new CBUtil.BufferBuilder(2, 0, rs.metadata.names.size() * rs.rows.size());
-            builder.add(Metadata.codec.encode(rs.metadata));
+            CBUtil.BufferBuilder builder = new CBUtil.BufferBuilder(2, 0, rs.metadata.columnCount * rs.rows.size());
+            builder.add(Metadata.codec.encode(rs.metadata, version));
             builder.add(CBUtil.intToCB(rs.rows.size()));
 
             for (List<ByteBuffer> row : rs.rows)
@@ -210,8 +218,12 @@ public class ResultSet
     {
         public static final CBCodec<Metadata> codec = new Codec();
 
+        public static final Metadata EMPTY = new Metadata(EnumSet.of(Flag.NO_METADATA), 0);
+
         public final EnumSet<Flag> flags;
         public final List<ColumnSpecification> names;
+        public final int columnCount;
+        public PagingState pagingState;
 
         public Metadata(List<ColumnSpecification> names)
         {
@@ -224,10 +236,21 @@ public class ResultSet
         {
             this.flags = flags;
             this.names = names;
+            this.columnCount = names.size();
+        }
+
+        private Metadata(EnumSet<Flag> flags, int columnCount)
+        {
+            this.flags = flags;
+            this.names = null;
+            this.columnCount = columnCount;
         }
 
         private boolean allInSameCF()
         {
+            if (names == null)
+                return false;
+
             assert !names.isEmpty();
 
             Iterator<ColumnSpecification> iter = names.iterator();
@@ -241,28 +264,53 @@ public class ResultSet
             return true;
         }
 
+        public Metadata setHasMorePages(PagingState pagingState)
+        {
+            flags.add(Flag.HAS_MORE_PAGES);
+            this.pagingState = pagingState;
+            return this;
+        }
+
         @Override
         public String toString()
         {
             StringBuilder sb = new StringBuilder();
-            for (ColumnSpecification name : names)
+
+            if (names == null)
             {
-                sb.append("[").append(name.toString());
-                sb.append("(").append(name.ksName).append(", ").append(name.cfName).append(")");
-                sb.append(", ").append(name.type).append("]");
+                sb.append("[").append(columnCount).append("columns]");
             }
+            else
+            {
+                for (ColumnSpecification name : names)
+                {
+                    sb.append("[").append(name.toString());
+                    sb.append("(").append(name.ksName).append(", ").append(name.cfName).append(")");
+                    sb.append(", ").append(name.type).append("]");
+                }
+            }
+            if (flags.contains(Flag.HAS_MORE_PAGES))
+                sb.append(" (to be continued)");
             return sb.toString();
         }
 
         private static class Codec implements CBCodec<Metadata>
         {
-            public Metadata decode(ChannelBuffer body)
+            public Metadata decode(ChannelBuffer body, int version)
             {
                 // flags & column count
                 int iflags = body.readInt();
                 int columnCount = body.readInt();
 
                 EnumSet<Flag> flags = Flag.deserialize(iflags);
+
+                PagingState state = null;
+                if (flags.contains(Flag.HAS_MORE_PAGES))
+                    state = PagingState.deserialize(CBUtil.readValue(body));
+
+                if (flags.contains(Flag.NO_METADATA))
+                    return new Metadata(flags, columnCount).setHasMorePages(state);
+
                 boolean globalTablesSpec = flags.contains(Flag.GLOBAL_TABLES_SPEC);
 
                 String globalKsName = null;
@@ -283,36 +331,48 @@ public class ResultSet
                     AbstractType type = DataType.toType(DataType.codec.decodeOne(body));
                     names.add(new ColumnSpecification(ksName, cfName, colName, type));
                 }
-                return new Metadata(flags, names);
+                return new Metadata(flags, names).setHasMorePages(state);
             }
 
-            public ChannelBuffer encode(Metadata m)
+            public ChannelBuffer encode(Metadata m, int version)
             {
+                boolean noMetadata = m.flags.contains(Flag.NO_METADATA);
                 boolean globalTablesSpec = m.flags.contains(Flag.GLOBAL_TABLES_SPEC);
+                boolean hasMorePages = m.flags.contains(Flag.HAS_MORE_PAGES);
 
-                int stringCount = globalTablesSpec ? 2 + m.names.size() : 3* m.names.size();
-                CBUtil.BufferBuilder builder = new CBUtil.BufferBuilder(1 + m.names.size(), stringCount, 0);
+                int stringCount = noMetadata ? 0 : (globalTablesSpec ? 2 + m.columnCount : 3 * m.columnCount);
+                CBUtil.BufferBuilder builder = new CBUtil.BufferBuilder(1 + (noMetadata ? 0 : m.columnCount), stringCount, hasMorePages ? 1 : 0);
 
                 ChannelBuffer header = ChannelBuffers.buffer(8);
+
+                assert version > 1 || (!m.flags.contains(Flag.HAS_MORE_PAGES) && !noMetadata): "version = " + version + ", flags = " + m.flags;
+
                 header.writeInt(Flag.serialize(m.flags));
-                header.writeInt(m.names.size());
+                header.writeInt(m.columnCount);
+
                 builder.add(header);
 
-                if (globalTablesSpec)
-                {
-                    builder.addString(m.names.get(0).ksName);
-                    builder.addString(m.names.get(0).cfName);
-                }
+                if (hasMorePages)
+                    builder.addValue(m.pagingState == null ? null : m.pagingState.serialize());
 
-                for (ColumnSpecification name : m.names)
+                if (!noMetadata)
                 {
-                    if (!globalTablesSpec)
+                    if (globalTablesSpec)
                     {
-                        builder.addString(name.ksName);
-                        builder.addString(name.cfName);
+                        builder.addString(m.names.get(0).ksName);
+                        builder.addString(m.names.get(0).cfName);
                     }
-                    builder.addString(name.toString());
-                    builder.add(DataType.codec.encodeOne(DataType.fromType(name.type)));
+
+                    for (ColumnSpecification name : m.names)
+                    {
+                        if (!globalTablesSpec)
+                        {
+                            builder.addString(name.ksName);
+                            builder.addString(name.cfName);
+                        }
+                        builder.addString(name.toString());
+                        builder.add(DataType.codec.encodeOne(DataType.fromType(name.type)));
+                    }
                 }
                 return builder.build();
             }
@@ -322,13 +382,15 @@ public class ResultSet
     public static enum Flag
     {
         // The order of that enum matters!!
-        GLOBAL_TABLES_SPEC;
+        GLOBAL_TABLES_SPEC,
+        HAS_MORE_PAGES,
+        NO_METADATA;
 
         public static EnumSet<Flag> deserialize(int flags)
         {
             EnumSet<Flag> set = EnumSet.noneOf(Flag.class);
             Flag[] values = Flag.values();
-            for (int n = 0; n < 32; n++)
+            for (int n = 0; n < values.length; n++)
             {
                 if ((flags & (1 << n)) != 0)
                     set.add(values[n]);

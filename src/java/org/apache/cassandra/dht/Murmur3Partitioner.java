@@ -41,11 +41,6 @@ public class Murmur3Partitioner extends AbstractPartitioner<LongToken>
     public static final LongToken MINIMUM = new LongToken(Long.MIN_VALUE);
     public static final long MAXIMUM = Long.MAX_VALUE;
 
-    public DecoratedKey convertFromDiskFormat(ByteBuffer key)
-    {
-        throw new UnsupportedOperationException();
-    }
-
     public DecoratedKey decorateKey(ByteBuffer key)
     {
         return new DecoratedKey(getToken(key), key);
@@ -121,7 +116,7 @@ public class Murmur3Partitioner extends AbstractPartitioner<LongToken>
 
         // 0-case
         if (!i.hasNext())
-            throw new RuntimeException("No nodes present in the cluster. How did you call this?");
+            throw new RuntimeException("No nodes present in the cluster. Has this node finished starting up?");
         // 1-case
         if (sortedTokens.size() == 1)
             ownerships.put((Token) i.next(), new Float(1.0));

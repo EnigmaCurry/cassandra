@@ -30,6 +30,8 @@ import javax.net.ssl.SSLEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.auth.IAuthenticator;
+import org.apache.cassandra.auth.ISaslAwareAuthenticator;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.security.SSLFactory;
@@ -95,8 +97,11 @@ public class Server implements CassandraDaemon.Server
 
     public void start()
     {
-        if (isRunning.compareAndSet(false, true))
-            run();
+	    if(!isRunning())
+	    {
+                run();
+                isRunning.set(true);
+	    }
     }
 
     public void stop()
@@ -110,8 +115,18 @@ public class Server implements CassandraDaemon.Server
         return isRunning.get();
     }
 
-    public void run()
+    private void run()
     {
+        // Check that a SaslAuthenticator can be provided by the configured
+        // IAuthenticator. If not, don't start the server.
+        IAuthenticator authenticator = DatabaseDescriptor.getAuthenticator();
+        if (authenticator.requireAuthentication() && !(authenticator instanceof ISaslAwareAuthenticator))
+        {
+            logger.error("Not starting native transport as the configured IAuthenticator is not capable of SASL authentication");
+            isRunning.compareAndSet(true, false);
+            return;
+        }
+
         // Configure the server.
         executionHandler = new ExecutionHandler(new RequestThreadPoolExecutor());
         factory = new NioServerSocketChannelFactory(Executors.newCachedThreadPool(), Executors.newCachedThreadPool());
@@ -123,7 +138,7 @@ public class Server implements CassandraDaemon.Server
         final EncryptionOptions.ClientEncryptionOptions clientEnc = DatabaseDescriptor.getClientEncryptionOptions();
         if (clientEnc.enabled)
         {
-            logger.info("enabling encrypted CQL connections between client and server");
+            logger.info("Enabling encrypted CQL connections between client and server");
             bootstrap.setPipelineFactory(new SecurePipelineFactory(this, clientEnc));
         }
         else
@@ -132,12 +147,12 @@ public class Server implements CassandraDaemon.Server
         }
 
         // Bind and start to accept incoming connections.
-        logger.info("Starting listening for CQL clients on " + socket + "...");
+        logger.info("Starting listening for CQL clients on {}...", socket);
         Channel channel = bootstrap.bind(socket);
         connectionTracker.allChannels.add(channel);
     }
 
-    public void close()
+    private void close()
     {
         // Close opened connections
         connectionTracker.closeAll();
@@ -145,6 +160,7 @@ public class Server implements CassandraDaemon.Server
         factory = null;
         executionHandler.releaseExternalResources();
         executionHandler = null;
+        logger.info("Stop listening for CQL clients");
     }
 
     public static class ConnectionTracker implements Connection.Tracker
@@ -222,7 +238,7 @@ public class Server implements CassandraDaemon.Server
             pipeline.addLast("dispatcher", dispatcher);
 
             return pipeline;
-      }
+        }
     }
 
     private static class SecurePipelineFactory extends PipelineFactory
@@ -292,7 +308,7 @@ public class Server implements CassandraDaemon.Server
             {
                 // That should not happen, so log an error, but return the
                 // endpoint address since there's a good change this is right
-                logger.error("Problem retrieving RPC address for " + endpoint, e);
+                logger.error("Problem retrieving RPC address for {}", endpoint, e);
                 return endpoint;
             }
         }

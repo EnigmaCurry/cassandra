@@ -57,7 +57,7 @@ public class MessageOut<T>
         this(verb,
              payload,
              serializer,
-             isTracing() ? ImmutableMap.of(TRACE_HEADER, UUIDGen.decompose(Tracing.instance().getSessionId()))
+             isTracing() ? ImmutableMap.of(TRACE_HEADER, UUIDGen.decompose(Tracing.instance.getSessionId()))
                          : Collections.<String, byte[]>emptyMap());
     }
 
@@ -82,17 +82,6 @@ public class MessageOut<T>
         builder.putAll(parameters).put(key, value);
         return new MessageOut<T>(verb, payload, serializer, builder.build());
     }
-    
-    public MessageOut withHeaderRemoved(String key)
-    {
-        ImmutableMap.Builder<String, byte[]> builder = ImmutableMap.builder();
-        for (Map.Entry<String, byte[]> entry : parameters.entrySet())
-        {
-            if (!entry.getKey().equals(key))
-                builder.put(entry.getKey(), entry.getValue());
-        }
-        return new MessageOut<T>(verb, payload, serializer, builder.build());
-    }
 
     public Stage getStage()
     {
@@ -106,7 +95,7 @@ public class MessageOut<T>
 
     public String toString()
     {
-        StringBuilder sbuf = new StringBuilder("");
+        StringBuilder sbuf = new StringBuilder();
         sbuf.append("TYPE:").append(getStage()).append(" VERB:").append(verb);
         return sbuf.toString();
     }

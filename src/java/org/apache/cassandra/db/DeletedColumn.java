@@ -17,10 +17,13 @@
  */
 package org.apache.cassandra.db;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.marshal.MarshalException;
+import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.Allocator;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.HeapAllocator;
@@ -44,10 +47,14 @@ public class DeletedColumn extends Column
     }
 
     @Override
-    public boolean isMarkedForDelete()
+    public Column withUpdatedTimestamp(long newTimestamp)
     {
-        // We don't rely on the column implementation because it could mistakenly return false if
-        // some node are not exactly synchronized, which is problematic (see #4307)
+        return new DeletedColumn(name, value, newTimestamp);
+    }
+
+    @Override
+    public boolean isMarkedForDelete(long now)
+    {
         return true;
     }
 
@@ -55,6 +62,24 @@ public class DeletedColumn extends Column
     public long getMarkedForDeleteAt()
     {
         return timestamp;
+    }
+
+    @Override
+    public void updateDigest(MessageDigest digest)
+    {
+        digest.update(name.duplicate());
+
+        DataOutputBuffer buffer = new DataOutputBuffer();
+        try
+        {
+            buffer.writeLong(timestamp);
+            buffer.writeByte(serializationFlags());
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
+        }
+        digest.update(buffer.getData(), 0, buffer.getLength());
     }
 
     @Override

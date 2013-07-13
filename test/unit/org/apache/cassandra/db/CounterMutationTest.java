@@ -26,12 +26,10 @@ import org.junit.Test;
 import static org.junit.Assert.fail;
 
 import org.apache.cassandra.db.context.CounterContext;
-import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.utils.*;
 import org.apache.cassandra.Util;
 import static org.apache.cassandra.db.context.CounterContext.ContextState;
-import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
 public class CounterMutationTest extends SchemaLoader
 {
@@ -66,7 +64,7 @@ public class CounterMutationTest extends SchemaLoader
         cm.apply();
 
         DecoratedKey dk = Util.dk("key1");
-        ColumnFamily cf = Util.getColumnFamily(Table.open("Keyspace1"), dk, "Counter1");
+        ColumnFamily cf = Util.getColumnFamily(Keyspace.open("Keyspace1"), dk, "Counter1");
 
         // First merges old shards
         CounterColumn.mergeAndRemoveOldShards(dk, cf, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
@@ -101,16 +99,16 @@ public class CounterMutationTest extends SchemaLoader
     }
 
     @Test
-    public void testGetOldShardFromSystemTable() throws IOException
+    public void testGetOldShardFromSystemKeyspace() throws IOException
     {
         // Renewing a bunch of times and checking we get the same thing from
-        // the system table that what is in memory
+        // the system keyspace that what is in memory
         CounterId.renewLocalId();
         CounterId.renewLocalId();
         CounterId.renewLocalId();
 
         List<CounterId.CounterIdRecord> inMem = CounterId.getOldLocalCounterIds();
-        List<CounterId.CounterIdRecord> onDisk = SystemTable.getOldLocalCounterIds();
+        List<CounterId.CounterIdRecord> onDisk = SystemKeyspace.getOldLocalCounterIds();
 
         assert inMem.equals(onDisk);
     }

@@ -21,32 +21,22 @@ import java.net.InetAddress;
 import java.util.Collection;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ConsistencyLevel;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.WriteType;
 import org.apache.cassandra.exceptions.*;
-import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.net.IAsyncCallback;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.utils.SimpleCondition;
 
 public abstract class AbstractWriteResponseHandler implements IAsyncCallback
 {
-    private static Predicate<InetAddress> isAlive = new Predicate<InetAddress>()
-    {
-        public boolean apply(InetAddress endpoint)
-        {
-            return FailureDetector.instance.isAlive(endpoint);
-        }
-    };
-
     private final SimpleCondition condition = new SimpleCondition();
-    protected final Table table;
-    protected final long startTime;
+    protected final Keyspace keyspace;
+    protected final long start;
     protected final Collection<InetAddress> naturalEndpoints;
     protected final ConsistencyLevel consistencyLevel;
     protected final Runnable callback;
@@ -57,16 +47,16 @@ public abstract class AbstractWriteResponseHandler implements IAsyncCallback
      * @param pendingEndpoints
      * @param callback A callback to be called when the write is successful.
      */
-    protected AbstractWriteResponseHandler(Table table,
+    protected AbstractWriteResponseHandler(Keyspace keyspace,
                                            Collection<InetAddress> naturalEndpoints,
                                            Collection<InetAddress> pendingEndpoints,
                                            ConsistencyLevel consistencyLevel,
                                            Runnable callback,
                                            WriteType writeType)
     {
-        this.table = table;
+        this.keyspace = keyspace;
         this.pendingEndpoints = pendingEndpoints;
-        this.startTime = System.currentTimeMillis();
+        this.start = System.nanoTime();
         this.consistencyLevel = consistencyLevel;
         this.naturalEndpoints = naturalEndpoints;
         this.callback = callback;
@@ -75,12 +65,12 @@ public abstract class AbstractWriteResponseHandler implements IAsyncCallback
 
     public void get() throws WriteTimeoutException
     {
-        long timeout = DatabaseDescriptor.getWriteRpcTimeout() - (System.currentTimeMillis() - startTime);
+        long timeout = TimeUnit.MILLISECONDS.toNanos(DatabaseDescriptor.getWriteRpcTimeout()) - (System.nanoTime() - start);
 
         boolean success;
         try
         {
-            success = condition.await(timeout, TimeUnit.MILLISECONDS);
+            success = condition.await(timeout, TimeUnit.NANOSECONDS);
         }
         catch (InterruptedException ex)
         {
@@ -88,7 +78,14 @@ public abstract class AbstractWriteResponseHandler implements IAsyncCallback
         }
 
         if (!success)
-            throw new WriteTimeoutException(writeType, consistencyLevel, ackCount(), consistencyLevel.blockFor(table) + pendingEndpoints.size());
+            throw new WriteTimeoutException(writeType, consistencyLevel, ackCount(), totalBlockFor());
+    }
+
+    protected int totalBlockFor()
+    {
+        // During bootstrap, we have to include the pending endpoints or we may fail the consistency level
+        // guarantees (see #833)
+        return consistencyLevel.blockFor(keyspace) + pendingEndpoints.size();
     }
 
     protected abstract int ackCount();
@@ -98,12 +95,12 @@ public abstract class AbstractWriteResponseHandler implements IAsyncCallback
 
     public void assureSufficientLiveNodes() throws UnavailableException
     {
-        consistencyLevel.assureSufficientLiveNodes(table, Iterables.filter(Iterables.concat(naturalEndpoints, pendingEndpoints), isAlive));
+        consistencyLevel.assureSufficientLiveNodes(keyspace, Iterables.filter(Iterables.concat(naturalEndpoints, pendingEndpoints), isAlive));
     }
 
     protected void signal()
     {
-        condition.signal();
+        condition.signalAll();
         if (callback != null)
             callback.run();
     }

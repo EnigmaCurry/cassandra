@@ -31,6 +31,8 @@ import com.google.common.base.Charsets;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.Iterables;
+
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.commons.lang.StringUtils;
 
 import org.antlr.runtime.tree.Tree;
@@ -50,8 +52,6 @@ import org.apache.cassandra.utils.UUIDGen;
 import org.apache.thrift.TBaseHelper;
 import org.apache.thrift.TException;
 import org.codehaus.jackson.*;
-import org.yaml.snakeyaml.Loader;
-import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 
@@ -142,7 +142,7 @@ public class CliClient
         CACHING,
         DEFAULT_TIME_TO_LIVE,
         SPECULATIVE_RETRY,
-        POPULATE_IO_CACHE_ON_FLUSH
+        POPULATE_IO_CACHE_ON_FLUSH,
     }
 
     private static final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.NetworkTopologyStrategy";
@@ -182,9 +182,7 @@ public class CliClient
         try
         {
             final Constructor constructor = new Constructor(CliUserHelp.class);
-            TypeDescription desc = new TypeDescription(CliUserHelp.class);
-            desc.putListPropertyType("commands", CliCommandHelp.class);
-            final Yaml yaml = new Yaml(new Loader(constructor));
+            final Yaml yaml = new Yaml(constructor);
             return (CliUserHelp) yaml.load(is);
         }
         finally
@@ -199,8 +197,14 @@ public class CliClient
         sessionState.out.println(getHelp().banner);
     }
 
+    private void printCQL3TablesWarning(String cmd)
+    {
+        sessionState.err.println("\nWARNING: CQL3 tables are intentionally omitted from '" + cmd + "' output.");
+        sessionState.err.println("See https://issues.apache.org/jira/browse/CASSANDRA-4377 for details.\n");
+    }
+
     // Execute a CLI Statement
-    public void executeCLIStatement(String statement) throws CharacterCodingException, TException, TimedOutException, NotFoundException, NoSuchFieldException, InvalidRequestException, UnavailableException, InstantiationException, IllegalAccessException, ClassNotFoundException
+    public void executeCLIStatement(String statement) throws CharacterCodingException, TException, TimedOutException, NotFoundException, NoSuchFieldException, InvalidRequestException, UnavailableException, InstantiationException, IllegalAccessException
     {
         Tree tree = CliCompiler.compileQuery(statement);
         try
@@ -438,7 +442,7 @@ public class CliClient
         SlicePredicate predicate = new SlicePredicate().setColumn_names(null).setSlice_range(range);
 
         int count = thriftClient.get_count(getKeyAsBytes(columnFamily, columnFamilySpec.getChild(1)), colParent, predicate, consistencyLevel);
-        sessionState.out.printf("%d columns%n", count);
+        sessionState.out.printf("%d cells%n", count);
     }
 
     private Iterable<CfDef> currentCfDefs()
@@ -499,7 +503,7 @@ public class CliClient
             assert columnTree != null;
             assert subColumnTree != null;
 
-            // table.cf['key']['column']['column']
+            // keyspace.cf['key']['column']['column']
             superColumnName = (columnTree.getType() == CliParser.FUNCTION_CALL)
                                       ? convertValueByFunction(columnTree, null, null).array()
                                       : columnNameAsByteArray(CliCompiler.getColumn(columnFamilySpec, 0), cfDef);
@@ -524,12 +528,12 @@ public class CliClient
         {
             thriftClient.remove(key, path, FBUtilities.timestampMicros(), consistencyLevel);
         }
-        sessionState.out.println(String.format("%s removed.", (columnSpecCnt == 0) ? "row" : "column"));
+        sessionState.out.println(String.format("%s removed.", (columnSpecCnt == 0) ? "row" : "cell"));
         elapsedTime(startTime);
     }
 
     private void doSlice(String keyspace, ByteBuffer key, String columnFamily, byte[] superColumnName, int limit)
-            throws InvalidRequestException, UnavailableException, TimedOutException, TException, IllegalAccessException, NotFoundException, InstantiationException, NoSuchFieldException
+            throws InvalidRequestException, UnavailableException, TimedOutException, TException, NotFoundException
     {
 
         long startTime = System.nanoTime();
@@ -557,7 +561,7 @@ public class CliClient
                 for (Column col : superColumn.getColumns())
                 {
                     validator = getValidatorForValue(cfDef, col.getName());
-                    sessionState.out.printf("%n     (column=%s, value=%s, timestamp=%d%s)", formatSubcolumnName(keyspace, columnFamily, col.name),
+                    sessionState.out.printf("%n     (name=%s, value=%s, timestamp=%d%s)", formatSubcolumnName(keyspace, columnFamily, col.name),
                                                     validator.getString(col.value), col.timestamp,
                                                     col.isSetTtl() ? String.format(", ttl=%d", col.getTtl()) : "");
                 }
@@ -573,7 +577,7 @@ public class CliClient
                                        ? formatSubcolumnName(keyspace, columnFamily, column.name)
                                        : formatColumnName(keyspace, columnFamily, column.name);
 
-                sessionState.out.printf("=> (column=%s, value=%s, timestamp=%d%s)%n",
+                sessionState.out.printf("=> (name=%s, value=%s, timestamp=%d%s)%n",
                                         formattedName,
                                         validator.getString(column.value),
                                         column.timestamp,
@@ -632,7 +636,7 @@ public class CliClient
 
     // Execute GET statement
     private void executeGet(Tree statement)
-            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException, IllegalAccessException, InstantiationException, ClassNotFoundException, NoSuchFieldException
+            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException
     {
         if (!CliMain.isConnected() || !hasKeySpace())
             return;
@@ -676,13 +680,13 @@ public class CliClient
             }
         }
 
-        // table.cf['key'] -- row slice
+        // keyspace.cf['key'] -- row slice
         if (columnSpecCnt == 0)
         {
             doSlice(keySpace, key, columnFamily, superColumnName, limit);
             return;
         }
-        // table.cf['key']['column'] -- slice of a super, or get of a standard
+        // keyspace.cf['key']['column'] -- slice of a super, or get of a standard
         else if (columnSpecCnt == 1)
         {
             columnName = getColumnName(columnFamily, columnFamilySpec.getChild(2));
@@ -694,7 +698,7 @@ public class CliClient
                 return;
             }
         }
-        // table.cf['key']['column']['column'] -- get of a sub-column
+        // keyspace.cf['key']['column']['column'] -- get of a sub-column
         else if (columnSpecCnt == 2)
         {
             superColumnName = getColumnName(columnFamily, columnFamilySpec.getChild(2)).array();
@@ -761,7 +765,7 @@ public class CliClient
                                      : formatColumnName(keySpace, columnFamily, column.name);
 
         // print results
-        sessionState.out.printf("=> (column=%s, value=%s, timestamp=%d%s)%n",
+        sessionState.out.printf("=> (name=%s, value=%s, timestamp=%d%s)%n",
                                 formattedColumnName,
                                 valueAsString,
                                 column.timestamp,
@@ -770,7 +774,7 @@ public class CliClient
     }
 
     private void doGetCounter(ByteBuffer key, ColumnPath path)
-            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException, IllegalAccessException, InstantiationException, ClassNotFoundException, NoSuchFieldException
+            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException
     {
         boolean isSuper = path.super_column != null;
 
@@ -894,7 +898,7 @@ public class CliClient
 
     // Execute SET statement
     private void executeSet(Tree statement)
-        throws TException, InvalidRequestException, UnavailableException, TimedOutException, NoSuchFieldException, InstantiationException, IllegalAccessException
+        throws TException, InvalidRequestException, UnavailableException, TimedOutException
     {
         if (!CliMain.isConnected() || !hasKeySpace())
             return;
@@ -913,13 +917,13 @@ public class CliClient
         byte[] superColumnName = null;
         ByteBuffer columnName;
 
-        // table.cf['key']
+        // keyspace.cf['key']
         if (columnSpecCnt == 0)
         {
-            sessionState.err.println("No column name specified, (type 'help;' or '?' for help on syntax).");
+            sessionState.err.println("No cell name specified, (type 'help;' or '?' for help on syntax).");
             return;
         }
-        // table.cf['key']['column'] = 'value'
+        // keyspace.cf['key']['column'] = 'value'
         else if (columnSpecCnt == 1)
         {
             // get the column name
@@ -930,7 +934,7 @@ public class CliClient
             }
             columnName = getColumnName(columnFamily, columnFamilySpec.getChild(2));
         }
-        // table.cf['key']['super_column']['column'] = 'value'
+        // keyspace.cf['key']['super_column']['column'] = 'value'
         else
         {
             assert (columnSpecCnt == 2) : "serious parsing error (this is a bug).";
@@ -984,7 +988,7 @@ public class CliClient
 
     // Execute INCR statement
     private void executeIncr(Tree statement, long multiplier)
-            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException, IllegalAccessException, InstantiationException, ClassNotFoundException, NoSuchFieldException
+            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException
     {
         if (!CliMain.isConnected() || !hasKeySpace())
             return;
@@ -998,12 +1002,12 @@ public class CliClient
         byte[] superColumnName = null;
         ByteBuffer columnName;
 
-        // table.cf['key']['column'] -- incr standard
+        // keyspace.cf['key']['column'] -- incr standard
         if (columnSpecCnt == 1)
         {
             columnName = getColumnName(columnFamily, columnFamilySpec.getChild(2));
         }
-        // table.cf['key']['column']['column'] -- incr super
+        // keyspace.cf['key']['column']['column'] -- incr super
         else if (columnSpecCnt == 2)
         {
             superColumnName = getColumnName(columnFamily, columnFamilySpec.getChild(2)).array();
@@ -1305,9 +1309,15 @@ public class CliClient
                 cfDef.setDefault_validation_class(CliUtils.unescapeSQLString(mValue));
                 break;
             case MIN_COMPACTION_THRESHOLD:
-                cfDef.setMin_compaction_threshold(Integer.parseInt(mValue));
+                int threshold = Integer.parseInt(mValue);
+                if (threshold <= 0)
+                    throw new RuntimeException("Disabling compaction by setting min/max compaction thresholds to 0 has been deprecated, set compaction_strategy_options={'enabled':false} instead");
+                cfDef.setMin_compaction_threshold(threshold);
                 break;
             case MAX_COMPACTION_THRESHOLD:
+                threshold = Integer.parseInt(mValue);
+                if (threshold <= 0)
+                    throw new RuntimeException("Disabling compaction by setting min/max compaction thresholds to 0 has been deprecated, set compaction_strategy_options={'enabled':false} instead");
                 cfDef.setMax_compaction_threshold(Integer.parseInt(mValue));
                 break;
             case REPLICATE_ON_WRITE:
@@ -1342,6 +1352,7 @@ public class CliClient
                 break;
             case SPECULATIVE_RETRY:
                 cfDef.setSpeculative_retry(CliUtils.unescapeSQLString(mValue));
+                break;
             case POPULATE_IO_CACHE_ON_FLUSH:
                 cfDef.setPopulate_io_cache_on_flush(Boolean.parseBoolean(mValue));
                 break;
@@ -1445,7 +1456,7 @@ public class CliClient
             {
                 if ((child.getChildCount() < 1) || (child.getChildCount() > 2))
                 {
-                    sessionState.err.println("Invalid columns clause.");
+                    sessionState.err.println("Invalid cells clause.");
                     return;
                 }
 
@@ -1456,7 +1467,7 @@ public class CliClient
                     columnCount = Integer.parseInt(columns);
                     if (columnCount < 0)
                     {
-                        sessionState.err.println("Invalid column limit: " + columnCount);
+                        sessionState.err.println("Invalid cell limit: " + columnCount);
                         return;
                     }
 
@@ -1465,7 +1476,7 @@ public class CliClient
                 }
                 catch (NumberFormatException nfe)
                 {
-                    sessionState.err.println("Invalid column number format: " + columns);
+                    sessionState.err.println("Invalid cell number format: " + columns);
                     return;
                 }
             }
@@ -1479,7 +1490,7 @@ public class CliClient
         if (columnCount == Integer.MAX_VALUE)
         {
             columnCount = 100;
-            sessionState.out.println("Using default column limit of 100");
+            sessionState.out.println("Using default cell limit of 100");
         }
 
 
@@ -1690,6 +1701,8 @@ public class CliClient
         if (!CliMain.isConnected())
             return;
 
+        printCQL3TablesWarning("show keyspaces");
+
         List<KsDef> keySpaces = thriftClient.describe_keyspaces();
 
         Collections.sort(keySpaces, new KsDefNamesComparator());
@@ -1704,6 +1717,8 @@ public class CliClient
     {
         if (!CliMain.isConnected())
             return;
+
+        printCQL3TablesWarning("show schema");
 
         final List<KsDef> keyspaces = thriftClient.describe_keyspaces();
         Collections.sort(keyspaces, new KsDefNamesComparator());
@@ -1737,7 +1752,7 @@ public class CliClient
      */
     private void showKeyspace(PrintStream output, KsDef ksDef)
     {
-        output.append("create keyspace ").append(ksDef.name);
+        output.append("create keyspace ").append(CliUtils.maybeEscapeName(ksDef.name));
 
         writeAttr(output, true, "placement_strategy", normaliseType(ksDef.strategy_class, "org.apache.cassandra.locator"));
 
@@ -1760,7 +1775,7 @@ public class CliClient
         output.append(";").append(NEWLINE);
         output.append(NEWLINE);
 
-        output.append("use " + ksDef.name + ";");
+        output.append("use " + CliUtils.maybeEscapeName(ksDef.name) + ";");
         output.append(NEWLINE);
         output.append(NEWLINE);
 
@@ -1779,7 +1794,7 @@ public class CliClient
      */
     private void showColumnFamily(PrintStream output, CfDef cfDef)
     {
-        output.append("create column family ").append(CliUtils.escapeSQLString(cfDef.name));
+        output.append("create column family ").append(CliUtils.maybeEscapeName(cfDef.name));
 
         writeAttr(output, true, "column_type", cfDef.column_type);
         writeAttr(output, false, "comparator", normaliseType(cfDef.comparator_type, "org.apache.cassandra.db.marshal"));
@@ -1805,7 +1820,6 @@ public class CliClient
 
         if (cfDef.isSetBloom_filter_fp_chance())
             writeAttr(output, false, "bloom_filter_fp_chance", cfDef.bloom_filter_fp_chance);
-
         if (!cfDef.compaction_strategy_options.isEmpty())
         {
             StringBuilder cOptions = new StringBuilder();
@@ -2000,7 +2014,7 @@ public class CliClient
     }
 
     // USE <keyspace_name>
-    private void executeUseKeySpace(Tree statement) throws TException
+    private void executeUseKeySpace(Tree statement)
     {
         if (!CliMain.isConnected())
             return;
@@ -2075,7 +2089,7 @@ public class CliClient
         }
     }
 
-    private void executeTraceNextQuery() throws TException, CharacterCodingException
+    private void executeTraceNextQuery() throws TException
     {
         if (!CliMain.isConnected())
             return;
@@ -2145,7 +2159,7 @@ public class CliClient
         }
     }
 
-    private void describeColumnFamily(KsDef ks_def, CfDef cf_def, NodeProbe probe) throws TException
+    private void describeColumnFamily(KsDef ks_def, CfDef cf_def, NodeProbe probe)
     {
         // fetching bean for current column family store
         ColumnFamilyStoreMBean cfMBean = (probe == null) ? null : probe.getCfsProxy(ks_def.getName(), cf_def.getName());
@@ -2162,7 +2176,7 @@ public class CliClient
         if (cf_def.default_validation_class != null)
             sessionState.out.printf("      Default column value validator: %s%n", cf_def.default_validation_class);
 
-        sessionState.out.printf("      Columns sorted by: %s%s%n", cf_def.comparator_type, cf_def.column_type.equals("Super") ? "/" + cf_def.subcomparator_type : "");
+        sessionState.out.printf("      Cells sorted by: %s%s%n", cf_def.comparator_type, cf_def.column_type.equals("Super") ? "/" + cf_def.subcomparator_type : "");
         sessionState.out.printf("      GC grace seconds: %s%n", cf_def.gc_grace_seconds);
         sessionState.out.printf("      Compaction min/max thresholds: %s/%s%n", cf_def.min_compaction_threshold, cf_def.max_compaction_threshold);
         sessionState.out.printf("      Read repair chance: %s%n", cf_def.read_repair_chance);
@@ -2221,7 +2235,7 @@ public class CliClient
 
         sessionState.out.printf("      Compaction Strategy: %s%n", cf_def.compaction_strategy);
 
-        if (!cf_def.compaction_strategy_options.isEmpty())
+        if (cf_def.compaction_strategy_options != null && !cf_def.compaction_strategy_options.isEmpty())
         {
             sessionState.out.println("      Compaction Strategy Options:");
             for (Map.Entry<String, String> e : cf_def.compaction_strategy_options.entrySet())
@@ -2241,6 +2255,8 @@ public class CliClient
     {
         if (!CliMain.isConnected())
             return;
+
+        printCQL3TablesWarning("describe");
 
         int argCount = statement.getChildCount();
 
@@ -2898,7 +2914,7 @@ public class CliClient
                     Column col = columnOrSuperColumn.column;
                     validator = getValidatorForValue(columnFamilyDef, col.getName());
 
-                    sessionState.out.printf("=> (column=%s, value=%s, timestamp=%d%s)%n",
+                    sessionState.out.printf("=> (name=%s, value=%s, timestamp=%d%s)%n",
                                     formatColumnName(keySpace, columnFamilyName, col.name), validator.getString(col.value), col.timestamp,
                                     col.isSetTtl() ? String.format(", ttl=%d", col.getTtl()) : "");
                 }
@@ -2911,7 +2927,7 @@ public class CliClient
                     {
                         validator = getValidatorForValue(columnFamilyDef, col.getName());
 
-                        sessionState.out.printf("%n     (column=%s, value=%s, timestamp=%d%s)",
+                        sessionState.out.printf("%n     (name=%s, value=%s, timestamp=%d%s)",
                                         formatSubcolumnName(keySpace, columnFamilyName, col.name), validator.getString(col.value), col.timestamp,
                                         col.isSetTtl() ? String.format(", ttl=%d", col.getTtl()) : "");
                     }
@@ -2942,16 +2958,14 @@ public class CliClient
         sessionState.out.printf("%n%d Row%s Returned.%n", slices.size(), (slices.size() > 1 ? "s" : ""));
     }
 
-    // retuns sub-column name in human-readable format
+    // returns sub-column name in human-readable format
     private String formatSubcolumnName(String keyspace, String columnFamily, ByteBuffer name)
-            throws NotFoundException, TException, IllegalAccessException, InstantiationException, NoSuchFieldException
     {
         return getFormatType(getCfDef(keyspace, columnFamily).subcomparator_type).getString(name);
     }
 
     // retuns column name in human-readable format
     private String formatColumnName(String keyspace, String columnFamily, ByteBuffer name)
-            throws NotFoundException, TException, IllegalAccessException, InstantiationException, NoSuchFieldException
     {
         return getFormatType(getCfDef(keyspace, columnFamily).comparator_type).getString(name);
     }

@@ -17,8 +17,6 @@
  */
 package org.apache.cassandra.db;
 
-import java.io.IOException;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +32,7 @@ public class CounterMutationVerbHandler implements IVerbHandler<CounterMutation>
 {
     private static final Logger logger = LoggerFactory.getLogger(CounterMutationVerbHandler.class);
 
-    public void doVerb(final MessageIn<CounterMutation> message, final String id)
+    public void doVerb(final MessageIn<CounterMutation> message, final int id)
     {
         try
         {
@@ -62,10 +60,6 @@ public class CounterMutationVerbHandler implements IVerbHandler<CounterMutation>
         {
             // The coordinator will timeout on it's own so ignore
             logger.debug("counter error", e);
-        }
-        catch (IOException e)
-        {
-            logger.error("Error in counter mutation", e);
         }
     }
 }

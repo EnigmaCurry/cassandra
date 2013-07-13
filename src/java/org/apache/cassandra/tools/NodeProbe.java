@@ -50,8 +50,8 @@ import org.apache.cassandra.locator.EndpointSnitchInfoMBean;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.service.*;
-import org.apache.cassandra.streaming.StreamingService;
-import org.apache.cassandra.streaming.StreamingServiceMBean;
+import org.apache.cassandra.streaming.StreamState;
+import org.apache.cassandra.streaming.StreamManagerMBean;
 import org.apache.cassandra.utils.SimpleCondition;
 
 /**
@@ -73,11 +73,10 @@ public class NodeProbe
     private StorageServiceMBean ssProxy;
     private MemoryMXBean memProxy;
     private RuntimeMXBean runtimeProxy;
-    private StreamingServiceMBean streamProxy;
+    private StreamManagerMBean streamProxy;
     public MessagingServiceMBean msProxy;
     private FailureDetectorMBean fdProxy;
     private CacheServiceMBean cacheService;
-    private PBSPredictorMBean PBSPredictorProxy;
     private StorageProxyMBean spProxy;
     private HintedHandOffManagerMBean hhProxy;
     private boolean failed;
@@ -89,7 +88,7 @@ public class NodeProbe
      * @param port TCP port of the remote JMX agent
      * @throws IOException on connection failures
      */
-    public NodeProbe(String host, int port, String username, String password) throws IOException, InterruptedException
+    public NodeProbe(String host, int port, String username, String password) throws IOException
     {
         assert username != null && !username.isEmpty() && password != null && !password.isEmpty()
                : "neither username nor password can be blank";
@@ -108,7 +107,7 @@ public class NodeProbe
      * @param port TCP port of the remote JMX agent
      * @throws IOException on connection failures
      */
-    public NodeProbe(String host, int port) throws IOException, InterruptedException
+    public NodeProbe(String host, int port) throws IOException
     {
         this.host = host;
         this.port = port;
@@ -121,7 +120,7 @@ public class NodeProbe
      * @param host hostname or IP address of the JMX agent
      * @throws IOException on connection failures
      */
-    public NodeProbe(String host) throws IOException, InterruptedException
+    public NodeProbe(String host) throws IOException
     {
         this.host = host;
         this.port = defaultPort;
@@ -149,12 +148,10 @@ public class NodeProbe
         {
             ObjectName name = new ObjectName(ssObjName);
             ssProxy = JMX.newMBeanProxy(mbeanServerConn, name, StorageServiceMBean.class);
-            name = new ObjectName(PBSPredictor.MBEAN_NAME);
-            PBSPredictorProxy = JMX.newMBeanProxy(mbeanServerConn, name, PBSPredictorMBean.class);
             name = new ObjectName(MessagingService.MBEAN_NAME);
             msProxy = JMX.newMBeanProxy(mbeanServerConn, name, MessagingServiceMBean.class);
-            name = new ObjectName(StreamingService.MBEAN_OBJECT_NAME);
-            streamProxy = JMX.newMBeanProxy(mbeanServerConn, name, StreamingServiceMBean.class);
+            name = new ObjectName(StreamManagerMBean.OBJECT_NAME);
+            streamProxy = JMX.newMBeanProxy(mbeanServerConn, name, StreamManagerMBean.class);
             name = new ObjectName(CompactionManager.MBEAN_OBJECT_NAME);
             compactionProxy = JMX.newMBeanProxy(mbeanServerConn, name, CompactionManagerMBean.class);
             name = new ObjectName(FailureDetector.MBEAN_NAME);
@@ -182,39 +179,39 @@ public class NodeProbe
         jmxc.close();
     }
 
-    public void forceTableCleanup(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public void forceKeyspaceCleanup(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.forceTableCleanup(tableName, columnFamilies);
+        ssProxy.forceKeyspaceCleanup(keyspaceName, columnFamilies);
     }
 
-    public void scrub(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public void scrub(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.scrub(tableName, columnFamilies);
+        ssProxy.scrub(keyspaceName, columnFamilies);
     }
 
-    public void upgradeSSTables(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public void upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.upgradeSSTables(tableName, columnFamilies);
+        ssProxy.upgradeSSTables(keyspaceName, excludeCurrentVersion, columnFamilies);
     }
 
-    public void forceTableCompaction(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public void forceKeyspaceCompaction(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.forceTableCompaction(tableName, columnFamilies);
+        ssProxy.forceKeyspaceCompaction(keyspaceName, columnFamilies);
     }
 
-    public void forceTableFlush(String tableName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public void forceKeyspaceFlush(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.forceTableFlush(tableName, columnFamilies);
+        ssProxy.forceKeyspaceFlush(keyspaceName, columnFamilies);
     }
 
-    public void forceTableRepair(String tableName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
+    public void forceKeyspaceRepair(String keyspaceName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepair(tableName, isSequential, isLocal, columnFamilies);
+        ssProxy.forceKeyspaceRepair(keyspaceName, isSequential, isLocal, columnFamilies);
     }
 
-    public void forceRepairAsync(final PrintStream out, final String tableName, boolean isSequential, boolean isLocal, boolean primaryRange, String... columnFamilies) throws IOException
+    public void forceRepairAsync(final PrintStream out, final String keyspaceName, boolean isSequential, boolean isLocal, boolean primaryRange, String... columnFamilies) throws IOException
     {
-        RepairRunner runner = new RepairRunner(out, tableName, columnFamilies);
+        RepairRunner runner = new RepairRunner(out, keyspaceName, columnFamilies);
         try
         {
             ssProxy.addNotificationListener(runner, null, null);
@@ -235,22 +232,45 @@ public class NodeProbe
         }
     }
 
-    public void forceTableRepairPrimaryRange(String tableName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
+    public void forceRepairRangeAsync(final PrintStream out, final String keyspaceName, boolean isSequential, boolean isLocal, final String startToken, final String endToken, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepairPrimaryRange(tableName, isSequential, isLocal, columnFamilies);
+        RepairRunner runner = new RepairRunner(out, keyspaceName, columnFamilies);
+        try
+        {
+            ssProxy.addNotificationListener(runner, null, null);
+            if (!runner.repairRangeAndWait(ssProxy,  isSequential, isLocal, startToken, endToken))
+                failed = true;
+        }
+        catch (Exception e)
+        {
+            throw new IOException(e) ;
+        }
+        finally
+        {
+            try
+            {
+                ssProxy.removeNotificationListener(runner);
+            }
+            catch (ListenerNotFoundException ignored) {}
+        }
     }
 
-    public void forceTableRepairRange(String beginToken, String endToken, String tableName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
+    public void forceKeyspaceRepairPrimaryRange(String keyspaceName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepairRange(beginToken, endToken, tableName, isSequential, isLocal, columnFamilies);
+        ssProxy.forceKeyspaceRepairPrimaryRange(keyspaceName, isSequential, isLocal, columnFamilies);
     }
 
-    public void invalidateKeyCache() throws IOException
+    public void forceKeyspaceRepairRange(String beginToken, String endToken, String keyspaceName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
+    {
+        ssProxy.forceKeyspaceRepairRange(beginToken, endToken, keyspaceName, isSequential, isLocal, columnFamilies);
+    }
+
+    public void invalidateKeyCache()
     {
         cacheService.invalidateKeyCache();
     }
 
-    public void invalidateRowCache() throws IOException
+    public void invalidateRowCache()
     {
         cacheService.invalidateRowCache();
     }
@@ -393,7 +413,7 @@ public class NodeProbe
     }
 
     /**
-     * Take a snapshot of all the tables, optionally specifying only a specific column family.
+     * Take a snapshot of all the keyspaces, optionally specifying only a specific column family.
      *
      * @param snapshotName the name of the snapshot.
      * @param columnFamily the column family to snapshot or all on null
@@ -436,7 +456,7 @@ public class NodeProbe
         ssProxy.decommission();
     }
 
-    public void move(String newToken) throws IOException, InterruptedException
+    public void move(String newToken) throws IOException
     {
         ssProxy.move(newToken);
     }
@@ -473,19 +493,6 @@ public class NodeProbe
     }
 
     /**
-     * Get the compaction threshold
-     *
-     * @param outs the stream to write to
-     */
-    public void getCompactionThreshold(PrintStream outs, String ks, String cf)
-    {
-        ColumnFamilyStoreMBean cfsProxy = getCfsProxy(ks, cf);
-        outs.println("Current compaction thresholds for " + ks + "/" + cf + ": \n" +
-                     " min = " + cfsProxy.getMinimumCompactionThreshold() + ", " +
-                     " max = " + cfsProxy.getMaximumCompactionThreshold());
-    }
-
-    /**
      * Set the compaction threshold
      *
      * @param minimumCompactionThreshold minimum compaction threshold
@@ -495,6 +502,21 @@ public class NodeProbe
     {
         ColumnFamilyStoreMBean cfsProxy = getCfsProxy(ks, cf);
         cfsProxy.setCompactionThresholds(minimumCompactionThreshold, maximumCompactionThreshold);
+    }
+
+    public void disableAutoCompaction(String ks, String ... columnFamilies) throws IOException
+    {
+        ssProxy.disableAutoCompaction(ks, columnFamilies);
+    }
+
+    public void enableAutoCompaction(String ks, String ... columnFamilies) throws IOException
+    {
+        ssProxy.enableAutoCompaction(ks, columnFamilies);
+    }
+
+    public void setIncrementalBackupsEnabled(boolean enabled)
+    {
+        ssProxy.setIncrementalBackupsEnabled(enabled);
     }
 
     public void setCacheCapacities(int keyCacheCapacity, int rowCacheCapacity)
@@ -523,24 +545,9 @@ public class NodeProbe
         return cfsProxy.getSSTablesForKey(key);
     }
 
-    public Set<InetAddress> getStreamDestinations()
+    public Set<StreamState> getStreamStatus()
     {
-        return streamProxy.getStreamDestinations();
-    }
-
-    public List<String> getFilesDestinedFor(InetAddress host) throws IOException
-    {
-        return streamProxy.getOutgoingFiles(host.getHostAddress());
-    }
-
-    public Set<InetAddress> getStreamSources()
-    {
-        return streamProxy.getStreamSources();
-    }
-
-    public List<String> getIncomingFiles(InetAddress host) throws IOException
-    {
-        return streamProxy.getIncomingFiles(host.getHostAddress());
+        return streamProxy.getCurrentStreams();
     }
 
     public String getOperationMode()
@@ -548,11 +555,11 @@ public class NodeProbe
         return ssProxy.getOperationMode();
     }
 
-    public void truncate(String tableName, String cfName)
+    public void truncate(String keyspaceName, String cfName)
     {
         try
         {
-            ssProxy.truncate(tableName, cfName);
+            ssProxy.truncate(keyspaceName, cfName);
         }
         catch (TimeoutException e)
         {
@@ -677,6 +684,21 @@ public class NodeProbe
         hhProxy.pauseHintsDelivery(false);
     }
 
+    public void stopNativeTransport()
+    {
+        ssProxy.stopNativeTransport();
+    }
+
+    public void startNativeTransport()
+    {
+        ssProxy.startNativeTransport();
+    }
+
+    public boolean isNativeTransportRunning()
+    {
+        return ssProxy.isNativeTransportRunning();
+    }
+
     public void stopGossiping()
     {
         ssProxy.stopGossiping();
@@ -715,6 +737,11 @@ public class NodeProbe
     public int getCompactionThroughput()
     {
         return ssProxy.getCompactionThroughputMbPerSec();
+    }
+
+    public int getStreamThroughput()
+    {
+        return ssProxy.getStreamThroughputMbPerSec();
     }
 
     public int getExceptionCount()
@@ -767,11 +794,6 @@ public class NodeProbe
         return ssProxy.describeRingJMX(keyspaceName);
     }
 
-    public PBSPredictorMBean getPBSPredictorMBean()
-    {
-        return PBSPredictorProxy;
-    }
-
     public void rebuild(String sourceDc)
     {
         ssProxy.rebuild(sourceDc);
@@ -791,6 +813,21 @@ public class NodeProbe
     {
         return failed;
     }
+    
+    public long getReadRepairAttempted()
+    {
+        return spProxy.getReadRepairAttempted();
+    }
+    
+    public long getReadRepairRepairedBlocking()
+    {
+        return spProxy.getReadRepairRepairedBlocking();
+    }
+    
+    public long getReadRepairRepairedBackground()
+    {
+        return spProxy.getReadRepairRepairedBackground();
+    }
 }
 
 class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, ColumnFamilyStoreMBean>>
@@ -809,13 +846,11 @@ class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, Colum
             public int compare(Entry<String, ColumnFamilyStoreMBean> e1, Entry<String, ColumnFamilyStoreMBean> e2)
             {
                 //compare keyspace, then CF name, then normal vs. index
-                int tableCmp = e1.getKey().compareTo(e2.getKey());
-                if(tableCmp != 0)
-                    return tableCmp;
+                int keyspaceNameCmp = e1.getKey().compareTo(e2.getKey());
+                if(keyspaceNameCmp != 0)
+                    return keyspaceNameCmp;
 
                 // get CF name and split it for index name
-                String q = e1.getValue().getColumnFamilyName();
-                String h = e2.getValue().getColumnFamilyName();
                 String e1CF[] = e1.getValue().getColumnFamilyName().split("\\.");
                 String e2CF[] = e1.getValue().getColumnFamilyName().split("\\.");
                 assert e1CF.length <= 2 && e2CF.length <= 2 : "unexpected split count for column family name";
@@ -848,9 +883,9 @@ class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, Colum
         List<Entry<String, ColumnFamilyStoreMBean>> mbeans = new ArrayList<Entry<String, ColumnFamilyStoreMBean>>(cfObjects.size());
         for(ObjectName n : cfObjects)
         {
-            String tableName = n.getKeyProperty("keyspace");
+            String keyspaceName = n.getKeyProperty("keyspace");
             ColumnFamilyStoreMBean cfsProxy = JMX.newMBeanProxy(mbeanServerConn, n, ColumnFamilyStoreMBean.class);
-            mbeans.add(new AbstractMap.SimpleImmutableEntry<String, ColumnFamilyStoreMBean>(tableName, cfsProxy));
+            mbeans.add(new AbstractMap.SimpleImmutableEntry<String, ColumnFamilyStoreMBean>(keyspaceName, cfsProxy));
         }
         return mbeans;
     }
@@ -936,6 +971,21 @@ class RepairRunner implements NotificationListener
         return success;
     }
 
+    public boolean repairRangeAndWait(StorageServiceMBean ssProxy, boolean isSequential, boolean isLocal, String startToken, String endToken) throws InterruptedException
+    {
+        cmd = ssProxy.forceRepairRangeAsync(startToken, endToken, keyspace, isSequential, isLocal, columnFamilies);
+        if (cmd > 0)
+        {
+            condition.await();
+        }
+        else
+        {
+            String message = String.format("[%s] Nothing to repair for keyspace '%s'", format.format(System.currentTimeMillis()), keyspace);
+            out.println(message);
+        }
+        return success;
+    }
+
     public void handleNotification(Notification notification, Object handback)
     {
         if ("repair".equals(notification.getType()))
@@ -947,9 +997,9 @@ class RepairRunner implements NotificationListener
                 String message = String.format("[%s] %s", format.format(notification.getTimeStamp()), notification.getMessage());
                 out.println(message);
                 // repair status is int array with [0] = cmd number, [1] = status
-                if (status[1] == AntiEntropyService.Status.SESSION_FAILED.ordinal())
+                if (status[1] == ActiveRepairService.Status.SESSION_FAILED.ordinal())
                     success = false;
-                else if (status[1] == AntiEntropyService.Status.FINISHED.ordinal())
+                else if (status[1] == ActiveRepairService.Status.FINISHED.ordinal())
                     condition.signalAll();
             }
         }

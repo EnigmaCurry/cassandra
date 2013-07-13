@@ -19,9 +19,11 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.cql3.Constants;
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.CounterSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class CounterColumnType extends AbstractCommutativeType
@@ -56,14 +58,13 @@ public class CounterColumnType extends AbstractCommutativeType
         return ByteBufferUtil.hexToBytes(source);
     }
 
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        if (bytes.remaining() != 8 && bytes.remaining() != 0)
-            throw new MarshalException(String.format("Expected 8 or 0 byte long (%d)", bytes.remaining()));
-    }
-
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.COUNTER;
+    }
+
+    public TypeSerializer<Long> getSerializer()
+    {
+        return CounterSerializer.instance;
     }
 }

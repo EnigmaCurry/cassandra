@@ -38,8 +38,8 @@ public class RangeTombstoneTest extends SchemaLoader
     @Test
     public void simpleQueryWithRangeTombstoneTest() throws Exception
     {
-        Table table = Table.open(KSNAME);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+        Keyspace keyspace = Keyspace.open(KSNAME);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CFNAME);
 
         // Inserting data
         String key = "k1";
@@ -78,7 +78,7 @@ public class RangeTombstoneTest extends SchemaLoader
             columns.add(b(i));
         for (int i : dead)
             columns.add(b(i));
-        cf = cfs.getColumnFamily(QueryFilter.getNamesFilter(dk(key), CFNAME, columns));
+        cf = cfs.getColumnFamily(QueryFilter.getNamesFilter(dk(key), CFNAME, columns, System.currentTimeMillis()));
 
         for (int i : live)
             assert isLive(cf, cf.getColumn(b(i))) : "Column " + i + " should be live";
@@ -86,7 +86,7 @@ public class RangeTombstoneTest extends SchemaLoader
             assert !isLive(cf, cf.getColumn(b(i))) : "Column " + i + " shouldn't be live";
 
         // Queries by slices
-        cf = cfs.getColumnFamily(QueryFilter.getSliceFilter(dk(key), CFNAME, b(7), b(30), false, Integer.MAX_VALUE));
+        cf = cfs.getColumnFamily(QueryFilter.getSliceFilter(dk(key), CFNAME, b(7), b(30), false, Integer.MAX_VALUE, System.currentTimeMillis()));
 
         for (int i : new int[]{ 7, 8, 9, 11, 13, 15, 17, 28, 29, 30 })
             assert isLive(cf, cf.getColumn(b(i))) : "Column " + i + " should be live";
@@ -98,8 +98,8 @@ public class RangeTombstoneTest extends SchemaLoader
     public void overlappingRangeTest() throws Exception
     {
         CompactionManager.instance.disableAutoCompaction();
-        Table table = Table.open(KSNAME);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+        Keyspace keyspace = Keyspace.open(KSNAME);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CFNAME);
 
         // Inserting data
         String key = "k2";
@@ -130,7 +130,7 @@ public class RangeTombstoneTest extends SchemaLoader
         rm.apply();
         cfs.forceBlockingFlush();
 
-        cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(dk(key), CFNAME));
+        cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(dk(key), CFNAME, System.currentTimeMillis()));
 
         for (int i = 0; i < 5; i++)
             assert isLive(cf, cf.getColumn(b(i))) : "Column " + i + " should be live";
@@ -141,7 +141,7 @@ public class RangeTombstoneTest extends SchemaLoader
 
         // Compact everything and re-test
         CompactionManager.instance.performMaximal(cfs);
-        cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(dk(key), CFNAME));
+        cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(dk(key), CFNAME, System.currentTimeMillis()));
 
         for (int i = 0; i < 5; i++)
             assert isLive(cf, cf.getColumn(b(i))) : "Column " + i + " should be live";
@@ -151,9 +151,40 @@ public class RangeTombstoneTest extends SchemaLoader
             assert !isLive(cf, cf.getColumn(b(i))) : "Column " + i + " shouldn't be live";
     }
 
+    @Test
+    public void reverseQueryTest() throws Exception
+    {
+        Keyspace table = Keyspace.open(KSNAME);
+        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+
+        // Inserting data
+        String key = "k3";
+        RowMutation rm;
+        ColumnFamily cf;
+
+        rm = new RowMutation(KSNAME, ByteBufferUtil.bytes(key));
+        add(rm, 2, 0);
+        rm.apply();
+        cfs.forceBlockingFlush();
+
+        rm = new RowMutation(KSNAME, ByteBufferUtil.bytes(key));
+        // Deletes everything but without being a row tombstone
+        delete(rm.addOrGet(CFNAME), 0, 10, 1);
+        add(rm, 1, 2);
+        rm.apply();
+        cfs.forceBlockingFlush();
+
+        // Get the last value of the row
+        cf = cfs.getColumnFamily(QueryFilter.getSliceFilter(dk(key), CFNAME, ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, true, 1, System.currentTimeMillis()));
+
+        assert !cf.isEmpty();
+        int last = i(cf.getSortedColumns().iterator().next().name());
+        assert last == 1 : "Last column should be column 1 since column 2 has been deleted";
+    }
+
     private static boolean isLive(ColumnFamily cf, Column c)
     {
-        return c != null && !c.isMarkedForDelete() && !cf.deletionInfo().isDeleted(c);
+        return c != null && !c.isMarkedForDelete(System.currentTimeMillis()) && !cf.deletionInfo().isDeleted(c);
     }
 
     private static ByteBuffer b(int i)
@@ -161,8 +192,9 @@ public class RangeTombstoneTest extends SchemaLoader
         return ByteBufferUtil.bytes(i);
     }
 
-    private static void insertData(ColumnFamilyStore cfs, String key) throws Exception
+    private static int i(ByteBuffer i)
     {
+        return ByteBufferUtil.toInt(i);
     }
 
     private static void add(RowMutation rm, int value, long timestamp)

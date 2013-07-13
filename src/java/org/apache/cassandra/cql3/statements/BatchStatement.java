@@ -20,24 +20,32 @@ package org.apache.cassandra.cql3.statements;
 import java.nio.ByteBuffer;
 import java.util.*;
 
-import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.db.ConsistencyLevel;
-import org.apache.cassandra.db.CounterMutation;
 import org.apache.cassandra.db.IMutation;
-import org.apache.cassandra.db.RowMutation;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.QueryState;
+import org.apache.cassandra.service.StorageProxy;
+import org.apache.cassandra.service.pager.PagingState;
+import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.Pair;
 
 /**
  * A <code>BATCH</code> statement parsed from a CQL query.
  *
  */
-public class BatchStatement extends ModificationStatement
+public class BatchStatement implements CQLStatement
 {
-    // statements to execute
-    protected final List<ModificationStatement> statements;
+    public static enum Type
+    {
+        LOGGED, UNLOGGED, COUNTER
+    }
+
+    private final int boundTerms;
+    public final Type type;
+    private final List<ModificationStatement> statements;
+    private final Attributes attrs;
 
     /**
      * Creates a new BatchStatement from a list of statements and a
@@ -47,112 +55,165 @@ public class BatchStatement extends ModificationStatement
      * @param statements a list of UpdateStatements
      * @param attrs additional attributes for statement (CL, timestamp, timeToLive)
      */
-    public BatchStatement(Type type, List<ModificationStatement> statements, Attributes attrs)
+    public BatchStatement(int boundTerms, Type type, List<ModificationStatement> statements, Attributes attrs)
     {
-        super(null, attrs);
+        this.boundTerms = boundTerms;
         this.type = type;
         this.statements = statements;
+        this.attrs = attrs;
     }
 
-    @Override
-    public void prepareKeyspace(ClientState state) throws InvalidRequestException
+    public int getBoundsTerms()
     {
-        for (ModificationStatement statement : statements)
-            statement.prepareKeyspace(state);
+        return boundTerms;
     }
 
-    @Override
     public void checkAccess(ClientState state) throws InvalidRequestException, UnauthorizedException
     {
-        Map<String, Set<String>> cfamsSeen = new HashMap<String, Set<String>>();
         for (ModificationStatement statement : statements)
-        {
-            String ks = statement.keyspace();
-            String cf = statement.columnFamily();
-
-            if (!cfamsSeen.containsKey(ks))
-                cfamsSeen.put(ks, new HashSet<String>());
-
-            // Avoid unnecessary authorization.
-            Set<String> cfs = cfamsSeen.get(ks);
-            if (!(cfs.contains(cf)))
-            {
-                state.hasColumnFamilyAccess(ks, cf, Permission.MODIFY);
-                cfs.add(cf);
-            }
-        }
+            statement.checkAccess(state);
     }
 
     public void validate(ClientState state) throws InvalidRequestException
     {
-        if (getTimeToLive() != 0)
+        if (attrs.isTimeToLiveSet())
             throw new InvalidRequestException("Global TTL on the BATCH statement is not supported.");
 
         for (ModificationStatement statement : statements)
         {
-            if (isSetTimestamp() && statement.isSetTimestamp())
+            if (attrs.isTimestampSet() && statement.isTimestampSet())
                 throw new InvalidRequestException("Timestamp must be set either on BATCH or individual statements");
-
-            if (statement.getTimeToLive() < 0)
-                throw new InvalidRequestException("A TTL must be greater or equal to 0");
         }
     }
 
-    protected void validateConsistency(ConsistencyLevel cl) throws InvalidRequestException
-    {
-        for (ModificationStatement statement : statements)
-            statement.validateConsistency(cl);
-    }
-
-    public Collection<? extends IMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
+    private Collection<? extends IMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
     throws RequestExecutionException, RequestValidationException
     {
         Map<Pair<String, ByteBuffer>, IMutation> mutations = new HashMap<Pair<String, ByteBuffer>, IMutation>();
         for (ModificationStatement statement : statements)
-        {
-            if (isSetTimestamp())
-                statement.setTimestamp(getTimestamp(now));
-
-            // Group mutation together, otherwise they won't get applied atomically
-            for (IMutation m : statement.getMutations(variables, local, cl, now))
-            {
-                if (m instanceof CounterMutation && type != Type.COUNTER)
-                    throw new InvalidRequestException("Counter mutations are only allowed in COUNTER batches");
-
-                if (m instanceof RowMutation && type == Type.COUNTER)
-                    throw new InvalidRequestException("Only counter mutations are allowed in COUNTER batches");
-
-                Pair<String, ByteBuffer> key = Pair.create(m.getTable(), m.key());
-                IMutation existing = mutations.get(key);
-
-                if (existing == null)
-                    mutations.put(key, m);
-                else
-                    existing.addAll(m);
-            }
-        }
+            addStatementMutations(statement, variables, local, cl, now, mutations);
 
         return mutations.values();
     }
 
-    public ParsedStatement.Prepared prepare(ColumnSpecification[] boundNames) throws InvalidRequestException
+    private Collection<? extends IMutation> getMutations(List<List<ByteBuffer>> variables, ConsistencyLevel cl, long now)
+    throws RequestExecutionException, RequestValidationException
     {
-        // XXX: we use our knowledge that Modification don't create new statement upon call to prepare()
-        for (ModificationStatement statement : statements)
+        Map<Pair<String, ByteBuffer>, IMutation> mutations = new HashMap<Pair<String, ByteBuffer>, IMutation>();
+        for (int i = 0; i < statements.size(); i++)
         {
-            statement.prepare(boundNames);
+            ModificationStatement statement = statements.get(i);
+            List<ByteBuffer> statementVariables = variables.get(i);
+            addStatementMutations(statement, statementVariables, false, cl, now, mutations);
         }
-        return new ParsedStatement.Prepared(this, Arrays.<ColumnSpecification>asList(boundNames));
+        return mutations.values();
     }
 
-    public ParsedStatement.Prepared prepare() throws InvalidRequestException
+    private void addStatementMutations(ModificationStatement statement,
+                                       List<ByteBuffer> variables,
+                                       boolean local,
+                                       ConsistencyLevel cl,
+                                       long now,
+                                       Map<Pair<String, ByteBuffer>, IMutation> mutations)
+    throws RequestExecutionException, RequestValidationException
     {
-        CFDefinition.Name[] boundNames = new CFDefinition.Name[getBoundsTerms()];
-        return prepare(boundNames);
+        // Group mutation together, otherwise they won't get applied atomically
+        for (IMutation m : statement.getMutations(variables, local, cl, attrs.getTimestamp(now, variables), true))
+        {
+            Pair<String, ByteBuffer> key = Pair.create(m.getKeyspaceName(), m.key());
+            IMutation existing = mutations.get(key);
+
+            if (existing == null)
+            {
+                mutations.put(key, m);
+            }
+            else
+            {
+                existing.addAll(m);
+            }
+        }
+    }
+
+    public ResultMessage execute(ConsistencyLevel cl, QueryState queryState, List<ByteBuffer> variables, int pageSize, PagingState pagingState) throws RequestExecutionException, RequestValidationException
+    {
+        if (cl == null)
+            throw new InvalidRequestException("Invalid empty consistency level");
+
+        execute(getMutations(variables, false, cl, queryState.getTimestamp()), cl);
+        return null;
+    }
+
+    public void executeWithPerStatementVariables(ConsistencyLevel cl, QueryState queryState, List<List<ByteBuffer>> variables) throws RequestExecutionException, RequestValidationException
+    {
+        if (cl == null)
+            throw new InvalidRequestException("Invalid empty consistency level");
+
+        execute(getMutations(variables, cl, queryState.getTimestamp()), cl);
+    }
+
+    private void execute(Collection<? extends IMutation> mutations, ConsistencyLevel cl) throws RequestExecutionException, RequestValidationException
+    {
+        boolean mutateAtomic = (type == Type.LOGGED && mutations.size() > 1);
+        StorageProxy.mutateWithTriggers(mutations, cl, mutateAtomic);
+    }
+
+    public ResultMessage executeInternal(QueryState queryState) throws RequestValidationException, RequestExecutionException
+    {
+        for (IMutation mutation : getMutations(Collections.<ByteBuffer>emptyList(), true, null, queryState.getTimestamp()))
+            mutation.apply();
+        return null;
     }
 
     public String toString()
     {
         return String.format("BatchStatement(type=%s, statements=%s)", type, statements);
+    }
+
+    public static class Parsed extends CFStatement
+    {
+        private final Type type;
+        private final Attributes.Raw attrs;
+        private final List<ModificationStatement.Parsed> parsedStatements;
+
+        public Parsed(Type type, Attributes.Raw attrs, List<ModificationStatement.Parsed> parsedStatements)
+        {
+            super(null);
+            this.type = type;
+            this.attrs = attrs;
+            this.parsedStatements = parsedStatements;
+        }
+
+        @Override
+        public void prepareKeyspace(ClientState state) throws InvalidRequestException
+        {
+            for (ModificationStatement.Parsed statement : parsedStatements)
+                statement.prepareKeyspace(state);
+        }
+
+        public ParsedStatement.Prepared prepare() throws InvalidRequestException
+        {
+            ColumnSpecification[] boundNames = new ColumnSpecification[getBoundsTerms()];
+
+            List<ModificationStatement> statements = new ArrayList<ModificationStatement>(parsedStatements.size());
+            for (ModificationStatement.Parsed parsed : parsedStatements)
+            {
+                ModificationStatement stmt = parsed.prepare(boundNames);
+                if (stmt.hasConditions())
+                    throw new InvalidRequestException("Conditional updates are not allowed in batches");
+
+                if (stmt.isCounter() && type != Type.COUNTER)
+                    throw new InvalidRequestException("Counter mutations are only allowed in COUNTER batches");
+
+                if (!stmt.isCounter() && type == Type.COUNTER)
+                    throw new InvalidRequestException("Only counter mutations are allowed in COUNTER batches");
+
+                statements.add(stmt);
+            }
+
+            Attributes prepAttrs = attrs.prepare("[batch]", "[batch]");
+            prepAttrs.collectMarkerSpecification(boundNames);
+
+            return new ParsedStatement.Prepared(new BatchStatement(getBoundsTerms(), type, statements, prepAttrs), Arrays.<ColumnSpecification>asList(boundNames));
+        }
     }
 }

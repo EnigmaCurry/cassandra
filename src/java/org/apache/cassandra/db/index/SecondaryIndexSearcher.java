@@ -21,9 +21,9 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.filter.IDiskAtomFilter;
-import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.db.filter.ExtendedFilter;
 import org.apache.cassandra.thrift.IndexExpression;
+import org.apache.cassandra.thrift.IndexOperator;
 
 public abstract class SecondaryIndexSearcher
 {
@@ -38,20 +38,36 @@ public abstract class SecondaryIndexSearcher
         this.baseCfs = indexManager.baseCfs;
     }
 
-    public abstract List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IDiskAtomFilter dataFilter, boolean countCQL3Rows);
+    public abstract List<Row> search(ExtendedFilter filter);
 
     /**
      * @return true this index is able to handle given clauses.
      */
-    public abstract boolean isIndexing(List<IndexExpression> clause);
-    
-    protected boolean isIndexValueStale(ColumnFamily liveData, ByteBuffer indexedColumnName, ByteBuffer indexedValue)
+    public boolean isIndexing(List<IndexExpression> clause)
     {
-        Column liveColumn = liveData.getColumn(indexedColumnName);
-        if (liveColumn == null || liveColumn.isMarkedForDelete())
-            return true;
-        
-        ByteBuffer liveValue = liveColumn.value();
-        return 0 != liveData.metadata().getValueValidator(indexedColumnName).compare(indexedValue, liveValue);
+        return highestSelectivityPredicate(clause) != null;
+    }
+
+    protected IndexExpression highestSelectivityPredicate(List<IndexExpression> clause)
+    {
+        IndexExpression best = null;
+        int bestMeanCount = Integer.MAX_VALUE;
+        for (IndexExpression expression : clause)
+        {
+            //skip columns belonging to a different index type
+            if(!columns.contains(expression.column_name))
+                continue;
+
+            SecondaryIndex index = indexManager.getIndexForColumn(expression.column_name);
+            if (index == null || (expression.op != IndexOperator.EQ))
+                continue;
+            int columns = index.getIndexCfs().getMeanColumns();
+            if (columns < bestMeanCount)
+            {
+                best = expression;
+                bestMeanCount = columns;
+            }
+        }
+        return best;
     }
 }

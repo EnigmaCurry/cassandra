@@ -24,6 +24,7 @@ import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -31,18 +32,24 @@ public class ColumnCounter
 {
     protected int live;
     protected int ignored;
+    protected final long timestamp;
 
-    public void count(Column column, ColumnFamily container)
+    public ColumnCounter(long timestamp)
     {
-        if (!isLive(column, container))
+        this.timestamp = timestamp;
+    }
+
+    public void count(Column column, DeletionInfo.InOrderTester tester)
+    {
+        if (!isLive(column, tester, timestamp))
             ignored++;
         else
             live++;
     }
 
-    protected static boolean isLive(Column column, ColumnFamily container)
+    protected static boolean isLive(Column column, DeletionInfo.InOrderTester tester, long timestamp)
     {
-        return column.isLive() && (!container.deletionInfo().isDeleted(column));
+        return column.isLive(timestamp) && (!tester.isDeleted(column));
     }
 
     public int live()
@@ -53,6 +60,17 @@ public class ColumnCounter
     public int ignored()
     {
         return ignored;
+    }
+
+    public ColumnCounter countAll(ColumnFamily container)
+    {
+        if (container == null)
+            return this;
+
+        DeletionInfo.InOrderTester tester = container.inOrderDeletionTester();
+        for (Column c : container)
+            count(c, tester);
+        return this;
     }
 
     public static class GroupByPrefix extends ColumnCounter
@@ -71,17 +89,18 @@ public class ColumnCounter
          *                column. If 0, all columns are grouped, otherwise we group
          *                those for which the {@code toGroup} first component are equals.
          */
-        public GroupByPrefix(CompositeType type, int toGroup)
+        public GroupByPrefix(long timestamp, CompositeType type, int toGroup)
         {
+            super(timestamp);
             this.type = type;
             this.toGroup = toGroup;
 
             assert toGroup == 0 || type != null;
         }
 
-        public void count(Column column, ColumnFamily container)
+        public void count(Column column, DeletionInfo.InOrderTester tester)
         {
-            if (!isLive(column, container))
+            if (!isLive(column, tester, timestamp))
             {
                 ignored++;
                 return;

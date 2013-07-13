@@ -17,6 +17,9 @@
  */
 package org.apache.cassandra.io.sstable;
 
+import java.nio.ByteBuffer;
+import java.util.List;
+
 import org.apache.cassandra.utils.StreamingHistogram;
 
 /**
@@ -30,15 +33,22 @@ public class ColumnStats
     /** the largest (client-supplied) timestamp in the row */
     public final long minTimestamp;
     public final long maxTimestamp;
-
+    public final int maxLocalDeletionTime;
     /** histogram of tombstone drop time */
     public final StreamingHistogram tombstoneHistogram;
 
-    public ColumnStats(int columnCount, long minTimestamp, long maxTimestamp, StreamingHistogram tombstoneHistogram)
+    /** max and min column names according to comparator */
+    public final List<ByteBuffer> minColumnNames;
+    public final List<ByteBuffer> maxColumnNames;
+
+    public ColumnStats(int columnCount, long minTimestamp, long maxTimestamp, int maxLocalDeletionTime, StreamingHistogram tombstoneHistogram, List<ByteBuffer> minColumnNames, List<ByteBuffer> maxColumnNames)
     {
         this.minTimestamp = minTimestamp;
         this.maxTimestamp = maxTimestamp;
+        this.maxLocalDeletionTime = maxLocalDeletionTime;
         this.columnCount = columnCount;
         this.tombstoneHistogram = tombstoneHistogram;
+        this.minColumnNames = minColumnNames;
+        this.maxColumnNames = maxColumnNames;
     }
 }

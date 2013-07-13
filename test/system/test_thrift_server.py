@@ -230,6 +230,28 @@ class TestMutations(ThriftTester):
         assert _big_slice('key1', ColumnParent('Standard2')) == []
         assert _big_slice('key1', ColumnParent('Super1')) == []
 
+    def test_cas(self):
+        _set_keyspace('Keyspace1')
+        def cas(expected, updates):
+            return client.cas('key1', 'Standard1', expected, updates, ConsistencyLevel.ONE)
+
+        cas_result = cas(_SIMPLE_COLUMNS, _SIMPLE_COLUMNS)
+        assert not cas_result.success
+        assert len(cas_result.current_values) == 0, cas_result
+
+        assert cas([], _SIMPLE_COLUMNS).success
+
+        result = [cosc.column for cosc in _big_slice('key1', ColumnParent('Standard1'))]
+        # CAS will use its own timestamp, so we can't just compare result == _SIMPLE_COLUMNS
+
+        cas_result = cas([], _SIMPLE_COLUMNS)
+        assert not cas_result.success
+        # When we CAS for non-existence, current_values is the first live column of the row
+        assert dict((c.name, c.value) for c in cas_result.current_values) == { _SIMPLE_COLUMNS[0].name : _SIMPLE_COLUMNS[0].value }, cas_result
+
+        # CL.SERIAL for reads
+        assert client.get('key1', ColumnPath('Standard1', column='c1'), ConsistencyLevel.SERIAL).column.value == 'value1'
+
     def test_missing_super(self):
         _set_keyspace('Keyspace1')
         _expect_missing(lambda: client.get('key1', ColumnPath('Super1', 'sc1', _i64(1)), ConsistencyLevel.ONE))
@@ -272,6 +294,35 @@ class TestMutations(ThriftTester):
         # Ensure that the count limit isn't clobbered
         p = SlicePredicate(slice_range=SliceRange('', '', False, 10))
         assert client.get_count('key1', ColumnParent('Standard1'), p, ConsistencyLevel.ONE) == 10
+
+    # test get_count() to work correctly with 'count' settings around page size (CASSANDRA-4833)
+    def test_count_around_page_size(self):
+        def slice_predicate(count):
+            return SlicePredicate(slice_range=SliceRange('', '', False, count))
+
+        _set_keyspace('Keyspace1')
+
+        key = 'key1'
+        parent = ColumnParent('Standard1')
+        cl = ConsistencyLevel.ONE
+
+        for i in xrange(0, 3050):
+            client.insert(key, parent, Column(str(i), '', 0), cl)
+
+        # same as page size
+        assert client.get_count(key, parent, slice_predicate(1024), cl) == 1024
+
+        # 1 above page size
+        assert client.get_count(key, parent, slice_predicate(1025), cl) == 1025
+
+        # above number or columns
+        assert client.get_count(key, parent, slice_predicate(4000), cl) == 3050
+
+        # same as number of columns
+        assert client.get_count(key, parent, slice_predicate(3050), cl) == 3050
+
+        # 1 above number of columns
+        assert client.get_count(key, parent, slice_predicate(3051), cl) == 3050
 
     def test_insert_blocking(self):
         _set_keyspace('Keyspace1')
@@ -964,8 +1015,7 @@ class TestMutations(ThriftTester):
             client.insert(key, ColumnParent('Standard1'), Column(key, 'v', 0), ConsistencyLevel.ONE)
 
         slices = get_range_slice(client, ColumnParent('Standard1'), SlicePredicate(column_names=['-a', '-a']), '', '', 1000, ConsistencyLevel.ONE)
-        # note the collated ordering rather than ascii
-        L = ['0', '1', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '2', '20', '21', '22', '23', '24', '25', '26', '27','28', '29', '3', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '4', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '5', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '6', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '7', '70', '71', '72', '73', '74', '75', '76', '77', '78', '79', '8', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '9', '90', '91', '92', '93', '94', '95', '96', '97', '98', '99', 'a', '-a', 'b', '-b']
+        L = ['-a', '-b', '0', '1', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '2', '20', '21', '22', '23', '24', '25', '26', '27','28', '29', '3', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '4', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '5', '50', '51', '52', '53', '54', '55', '56', '57', '58', '59', '6', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69', '7', '70', '71', '72', '73', '74', '75', '76', '77', '78', '79', '8', '80', '81', '82', '83', '84', '85', '86', '87', '88', '89', '9', '90', '91', '92', '93', '94', '95', '96', '97', '98', '99', 'a', 'b']
         assert len(slices) == len(L)
         for key, ks in zip(L, slices):
             assert key == ks.key
@@ -982,10 +1032,10 @@ class TestMutations(ThriftTester):
                 assert key == ks.key
         
         slices = get_range_slice(client, ColumnParent('Standard1'), SlicePredicate(column_names=['-a', '-a']), 'a', '', 1000, ConsistencyLevel.ONE)
-        check_slices_against_keys(['a', '-a', 'b', '-b'], slices)
+        check_slices_against_keys(['a', 'b'], slices)
         
         slices = get_range_slice(client, ColumnParent('Standard1'), SlicePredicate(column_names=['-a', '-a']), '', '15', 1000, ConsistencyLevel.ONE)
-        check_slices_against_keys(['0', '1', '10', '11', '12', '13', '14', '15'], slices)
+        check_slices_against_keys(['-a', '-b', '0', '1', '10', '11', '12', '13', '14', '15'], slices)
 
         slices = get_range_slice(client, ColumnParent('Standard1'), SlicePredicate(column_names=['-a', '-a']), '50', '51', 1000, ConsistencyLevel.ONE)
         check_slices_against_keys(['50', '51'], slices)
@@ -1110,7 +1160,7 @@ class TestMutations(ThriftTester):
         assert [row.key for row in result] == ['a', 'b', 'c', 'd', 'e',], [row.key for row in result]
 
         result = client.get_range_slices(cp, SlicePredicate(column_names=['col1', 'col3']), KeyRange(start_token=copp_token('c'), end_token=copp_token('c')), ConsistencyLevel.ONE)
-        assert [row.key for row in result] == ['d', 'e', 'a', 'b', 'c',], [row.key for row in result]
+        assert [row.key for row in result] == ['a', 'b', 'c', 'd', 'e',], [row.key for row in result]
         
 
     def test_get_slice_by_names(self):
@@ -1194,7 +1244,7 @@ class TestMutations(ThriftTester):
 
     def test_describe_keyspace(self):
         kspaces = client.describe_keyspaces()
-        assert len(kspaces) == 3, kspaces # ['Keyspace2', 'Keyspace1', 'system']
+        assert len(kspaces) == 5, kspaces # ['Keyspace2', 'Keyspace1', 'system', 'system_traces', 'system_auth']
 
         sysks = client.describe_keyspace("system")
         assert sysks in kspaces
@@ -1216,18 +1266,18 @@ class TestMutations(ThriftTester):
         assert list(client.describe_ring('Keyspace1'))[0].endpoints == ['127.0.0.1']
 
     def test_describe_token_map(self):
-        # test/conf/cassandra.yaml specifies org.apache.cassandra.dht.CollatingOrderPreservingPartitioner
-        # which uses BytesToken, so this just tests that the string representation of the token	
+        # test/conf/cassandra.yaml specifies org.apache.cassandra.dht.ByteOrderedPartitioner
+        # which uses BytesToken, so this just tests that the string representation of the token
         # matches a regex pattern for BytesToken.toString().
         ring = client.describe_token_map().items()
         assert len(ring) == 1
         token, node = ring[0]
-        assert re.match("^Token\(bytes\[[0-9A-Fa-f]{32}\]\)", token) 
+        assert re.match("[0-9A-Fa-f]{32}", token)
         assert node == '127.0.0.1'
 
     def test_describe_partitioner(self):
         # Make sure this just reads back the values from the config.
-        assert client.describe_partitioner() == "org.apache.cassandra.dht.CollatingOrderPreservingPartitioner"
+        assert client.describe_partitioner() == "org.apache.cassandra.dht.ByteOrderedPartitioner"
 
     def test_describe_snitch(self):
         assert client.describe_snitch() == "org.apache.cassandra.locator.SimpleSnitch"
@@ -1397,7 +1447,6 @@ class TestMutations(ThriftTester):
         ks1 = client.describe_keyspace('Keyspace1')
         assert 'NewColumnFamily' in [x.name for x in ks1.cf_defs]
         cfid = [x.id for x in ks1.cf_defs if x.name=='NewColumnFamily'][0]
-        assert cfid > 1000
         
         # modify invalid
         modified_cf = CfDef('Keyspace1', 'NewColumnFamily', column_metadata=[cd])

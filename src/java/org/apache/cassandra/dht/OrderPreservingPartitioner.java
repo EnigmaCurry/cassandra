@@ -44,11 +44,6 @@ public class OrderPreservingPartitioner extends AbstractPartitioner<StringToken>
         return new DecoratedKey(getToken(key), key);
     }
 
-    public DecoratedKey convertFromDiskFormat(ByteBuffer key)
-    {
-        return new DecoratedKey(getToken(key), key);
-    }
-
     public StringToken midpoint(Token ltoken, Token rtoken)
     {
         int sigchars = Math.max(((StringToken)ltoken).token.length(), ((StringToken)rtoken).token.length());
@@ -189,7 +184,7 @@ public class OrderPreservingPartitioner extends AbstractPartitioner<StringToken>
             lastToken = node;
         }
 
-        for (String ks : Schema.instance.getTables())
+        for (String ks : Schema.instance.getKeyspaces())
         {
             for (CFMetaData cfmd : Schema.instance.getKSMetaData(ks).cfMetaData().values())
             {

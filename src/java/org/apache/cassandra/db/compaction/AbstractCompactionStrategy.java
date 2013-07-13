@@ -19,6 +19,9 @@ package org.apache.cassandra.db.compaction;
 
 import java.util.*;
 
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,12 +49,27 @@ public abstract class AbstractCompactionStrategy
     protected static final long DEFAULT_TOMBSTONE_COMPACTION_INTERVAL = 86400;
     protected static final String TOMBSTONE_THRESHOLD_OPTION = "tombstone_threshold";
     protected static final String TOMBSTONE_COMPACTION_INTERVAL_OPTION = "tombstone_compaction_interval";
+    protected static final String COMPACTION_ENABLED = "enabled";
 
     public final Map<String, String> options;
 
     protected final ColumnFamilyStore cfs;
     protected float tombstoneThreshold;
     protected long tombstoneCompactionInterval;
+
+    /**
+     * pause/resume/getNextBackgroundTask must synchronize.  This guarantees that after pause completes,
+     * no new tasks will be generated; or put another way, pause can't run until in-progress tasks are
+     * done being created.
+     *
+     * This allows runWithCompactionsDisabled to be confident that after pausing, once in-progress
+     * tasks abort, it's safe to proceed with truncate/cleanup/etc.
+     *
+     * See CASSANDRA-3430
+     */
+    protected boolean isActive = true;
+
+    protected volatile boolean enabled = true;
 
     protected AbstractCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options)
     {
@@ -68,6 +86,13 @@ public abstract class AbstractCompactionStrategy
             tombstoneThreshold = optionValue == null ? DEFAULT_TOMBSTONE_THRESHOLD : Float.parseFloat(optionValue);
             optionValue = options.get(TOMBSTONE_COMPACTION_INTERVAL_OPTION);
             tombstoneCompactionInterval = optionValue == null ? DEFAULT_TOMBSTONE_COMPACTION_INTERVAL : Long.parseLong(optionValue);
+            optionValue = options.get(COMPACTION_ENABLED);
+
+            if (optionValue != null)
+            {
+                if (optionValue.equalsIgnoreCase("false"))
+                    this.enabled = false;
+            }
         }
         catch (ConfigurationException e)
         {
@@ -78,30 +103,58 @@ public abstract class AbstractCompactionStrategy
     }
 
     /**
-     * Releases any resources if this strategy is shutdown (when the CFS is reloaded after a schema change).
-     * Default is to do nothing.
+     * For internal, temporary suspension of background compactions so that we can do exceptional
+     * things like truncate or major compaction
      */
-    public void shutdown() { }
+    public synchronized void pause()
+    {
+        isActive = false;
+    }
+
+    /**
+     * For internal, temporary suspension of background compactions so that we can do exceptional
+     * things like truncate or major compaction
+     */
+    public synchronized void resume()
+    {
+        isActive = true;
+    }
+
+    /**
+     * Releases any resources if this strategy is shutdown (when the CFS is reloaded after a schema change).
+     */
+    public void shutdown()
+    {
+        isActive = false;
+    }
 
     /**
      * @param gcBefore throw away tombstones older than this
+     *
      * @return the next background/minor compaction task to run; null if nothing to do.
+     *
      * Is responsible for marking its sstables as compaction-pending.
      */
     public abstract AbstractCompactionTask getNextBackgroundTask(final int gcBefore);
 
     /**
      * @param gcBefore throw away tombstones older than this
+     *
      * @return a compaction task that should be run to compact this columnfamilystore
      * as much as possible.  Null if nothing to do.
+     *
+     * Is responsible for marking its sstables as compaction-pending.
      */
     public abstract AbstractCompactionTask getMaximalTask(final int gcBefore);
 
     /**
      * @param sstables SSTables to compact. Must be marked as compacting.
      * @param gcBefore throw away tombstones older than this
+     *
      * @return a compaction task corresponding to the requested sstables.
      * Will not be null. (Will throw if user requests an invalid compaction.)
+     *
+     * Is responsible for marking its sstables as compaction-pending.
      */
     public abstract AbstractCompactionTask getUserDefinedTask(Collection<SSTableReader> sstables, final int gcBefore);
 
@@ -115,23 +168,36 @@ public abstract class AbstractCompactionStrategy
      */
     public abstract long getMaxSSTableSize();
 
+    public boolean isEnabled()
+    {
+        return this.enabled && this.isActive;
+    }
+
+    public void enable()
+    {
+        this.enabled = true;
+    }
+
+    public void disable()
+    {
+        this.enabled = false;
+    }
+
     /**
      * Filters SSTables that are to be blacklisted from the given collection
      *
      * @param originalCandidates The collection to check for blacklisted SSTables
      * @return list of the SSTables with blacklisted ones filtered out
      */
-    public static List<SSTableReader> filterSuspectSSTables(Collection<SSTableReader> originalCandidates)
+    public static Iterable<SSTableReader> filterSuspectSSTables(Iterable<SSTableReader> originalCandidates)
     {
-        List<SSTableReader> filteredCandidates = new ArrayList<SSTableReader>();
-
-        for (SSTableReader candidate : originalCandidates)
+        return Iterables.filter(originalCandidates, new Predicate<SSTableReader>()
         {
-            if (!candidate.isMarkedSuspect())
-                filteredCandidates.add(candidate);
-        }
-
-        return filteredCandidates;
+            public boolean apply(SSTableReader sstable)
+            {
+                return !sstable.isMarkedSuspect();
+            }
+        });
     }
 
     /**
@@ -142,9 +208,10 @@ public abstract class AbstractCompactionStrategy
      */
     public List<ICompactionScanner> getScanners(Collection<SSTableReader> sstables, Range<Token> range)
     {
+        RateLimiter limiter = CompactionManager.instance.getRateLimiter();
         ArrayList<ICompactionScanner> scanners = new ArrayList<ICompactionScanner>();
         for (SSTableReader sstable : sstables)
-            scanners.add(sstable.getDirectScanner(range));
+            scanners.add(sstable.getScanner(range, limiter));
         return scanners;
     }
 
@@ -179,17 +246,21 @@ public abstract class AbstractCompactionStrategy
             // there is no overlap, tombstones are safely droppable
             return true;
         }
+        else if (CompactionController.getFullyExpiredSSTables(cfs, Collections.singleton(sstable), overlaps, gcBefore).size() > 0)
+        {
+            return true;
+        }
         else
         {
             // what percentage of columns do we expect to compact outside of overlap?
-            if (sstable.getKeySamples().size() < 2)
+            if (sstable.getKeySampleSize() < 2)
             {
                 // we have too few samples to estimate correct percentage
                 return false;
             }
             // first, calculate estimated keys that do not overlap
             long keys = sstable.estimatedKeys();
-            Set<Range<Token>> ranges = new HashSet<Range<Token>>();
+            Set<Range<Token>> ranges = new HashSet<Range<Token>>(overlaps.size());
             for (SSTableReader overlap : overlaps)
                 ranges.add(new Range<Token>(overlap.first.token, overlap.last.token, overlap.partitioner));
             long remainingKeys = keys - sstable.estimatedKeysForRanges(ranges);
@@ -238,9 +309,18 @@ public abstract class AbstractCompactionStrategy
             }
         }
 
+        String compactionEnabled = options.get(COMPACTION_ENABLED);
+        if (compactionEnabled != null)
+        {
+            if (!compactionEnabled.equalsIgnoreCase("true") && !compactionEnabled.equalsIgnoreCase("false"))
+            {
+                throw new ConfigurationException(String.format("enabled should either be 'true' or 'false', not %s", compactionEnabled));
+            }
+        }
         Map<String, String> uncheckedOptions = new HashMap<String, String>(options);
         uncheckedOptions.remove(TOMBSTONE_THRESHOLD_OPTION);
         uncheckedOptions.remove(TOMBSTONE_COMPACTION_INTERVAL_OPTION);
+        uncheckedOptions.remove(COMPACTION_ENABLED);
         return uncheckedOptions;
     }
 }

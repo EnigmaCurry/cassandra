@@ -25,6 +25,9 @@ import com.google.common.collect.ImmutableMap;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.BytesSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class ColumnToCollectionType extends AbstractType<ByteBuffer>
@@ -71,16 +74,6 @@ public class ColumnToCollectionType extends AbstractType<ByteBuffer>
         return t.nameComparator().compare(o1, o2);
     }
 
-    public ByteBuffer compose(ByteBuffer bytes)
-    {
-        return BytesType.instance.compose(bytes);
-    }
-
-    public ByteBuffer decompose(ByteBuffer value)
-    {
-        return BytesType.instance.decompose(value);
-    }
-
     public String getString(ByteBuffer bytes)
     {
         return BytesType.instance.getString(bytes);
@@ -98,9 +91,15 @@ public class ColumnToCollectionType extends AbstractType<ByteBuffer>
         }
     }
 
+    @Override
     public void validate(ByteBuffer bytes)
     {
         throw new UnsupportedOperationException("ColumnToCollectionType should only be used in composite types, never alone");
+    }
+
+    public TypeSerializer<ByteBuffer> getSerializer()
+    {
+        return BytesSerializer.instance;
     }
 
     public void validateCollectionMember(ByteBuffer bytes, ByteBuffer collectionName) throws MarshalException

@@ -21,6 +21,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -30,17 +31,13 @@ import java.util.Map;
 
 import com.google.common.base.Splitter;
 
+import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
-import org.apache.cassandra.transport.messages.CredentialsMessage;
-import org.apache.cassandra.transport.messages.ExecuteMessage;
-import org.apache.cassandra.transport.messages.OptionsMessage;
-import org.apache.cassandra.transport.messages.PrepareMessage;
-import org.apache.cassandra.transport.messages.QueryMessage;
-import org.apache.cassandra.transport.messages.RegisterMessage;
-import org.apache.cassandra.transport.messages.StartupMessage;
+import org.apache.cassandra.transport.messages.*;
 import org.apache.cassandra.utils.Hex;
+
 import static org.apache.cassandra.config.EncryptionOptions.ClientEncryptionOptions;
 
 public class Client extends SimpleClient
@@ -112,8 +109,24 @@ public class Client extends SimpleClient
         }
         else if (msgType.equals("QUERY"))
         {
-            String query = line.substring(6);
-            return new QueryMessage(query, ConsistencyLevel.ONE);
+            line = line.substring(6);
+            // Ugly hack to allow setting a page size, but that's playground code anyway
+            String query = line;
+            int pageSize = -1;
+            if (line.matches(".+ !\\d+$"))
+            {
+                int idx = line.lastIndexOf('!');
+                query = line.substring(0, idx-1);
+                try
+                {
+                    pageSize = Integer.parseInt(line.substring(idx+1, line.length()));
+                }
+                catch (NumberFormatException e)
+                {
+                    return null;
+                }
+            }
+            return new QueryMessage(query, ConsistencyLevel.ONE, Collections.<ByteBuffer>emptyList(), pageSize);
         }
         else if (msgType.equals("PREPARE"))
         {
@@ -141,7 +154,7 @@ public class Client extends SimpleClient
                     }
                     values.add(bb);
                 }
-                return new ExecuteMessage(id, values, ConsistencyLevel.ONE);
+                return new ExecuteMessage(id, values, ConsistencyLevel.ONE, -1);
             }
             catch (Exception e)
             {
@@ -154,16 +167,20 @@ public class Client extends SimpleClient
         }
         else if (msgType.equals("CREDENTIALS"))
         {
+            System.err.println("[WARN] CREDENTIALS command is deprecated, use AUTHENTICATE instead");
             CredentialsMessage msg = new CredentialsMessage();
-            while (iter.hasNext())
-            {
-                String next = iter.next();
-                String[] kv = next.split("=");
-                if (kv.length != 2)
-                    return null;
-                msg.credentials.put(kv[0], kv[1]);
-            }
+            msg.credentials.putAll(readCredentials(iter));
             return msg;
+        }
+        else if (msgType.equals("AUTHENTICATE"))
+        {
+            Map<String, String> credentials = readCredentials(iter);
+            if(!credentials.containsKey(IAuthenticator.USERNAME_KEY) || !credentials.containsKey(IAuthenticator.PASSWORD_KEY))
+            {
+                System.err.println("[ERROR] Authentication requires both 'username' and 'password'");
+                return null;
+            }
+            return new AuthResponse(encodeCredentialsForSasl(credentials));
         }
         else if (msgType.equals("REGISTER"))
         {
@@ -179,6 +196,35 @@ public class Client extends SimpleClient
             }
         }
         return null;
+    }
+
+    private Map<String, String> readCredentials(Iterator<String> iter)
+    {
+        final Map<String, String> credentials = new HashMap<String, String>();
+        while (iter.hasNext())
+        {
+            String next = iter.next();
+            String[] kv = next.split("=");
+            if (kv.length != 2)
+            {
+                System.err.println("[ERROR] Default authentication requires username & password");
+                return null;
+            }
+            credentials.put(kv[0], kv[1]);
+        }
+        return credentials;
+    }
+
+    private byte[] encodeCredentialsForSasl(Map<String, String> credentials)
+    {
+        byte[] username = credentials.get(IAuthenticator.USERNAME_KEY).getBytes(Charset.forName("UTF-8"));
+        byte[] password = credentials.get(IAuthenticator.PASSWORD_KEY).getBytes(Charset.forName("UTF-8"));
+        byte[] initialResponse = new byte[username.length + password.length + 2];
+        initialResponse[0] = 0;
+        System.arraycopy(username, 0, initialResponse, 1, username.length);
+        initialResponse[username.length + 1] = 0;
+        System.arraycopy(password, 0, initialResponse, username.length + 2, password.length);
+        return initialResponse;
     }
 
     public static void main(String[] args) throws Exception

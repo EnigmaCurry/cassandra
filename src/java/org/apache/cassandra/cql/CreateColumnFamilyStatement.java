@@ -19,10 +19,10 @@ package org.apache.cassandra.cql;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
@@ -135,7 +135,7 @@ public class CreateColumnFamilyStatement
                                           ? CFPropDefs.comparators.get(col.getValue())
                                           : col.getValue();
                 AbstractType<?> validator = TypeParser.parse(validatorClassName);
-                columnDefs.put(columnName, new ColumnDefinition(columnName, validator, null, null, null, null));
+                columnDefs.put(columnName, ColumnDefinition.regularDef(columnName, validator, null));
             }
             catch (ConfigurationException e)
             {
@@ -179,6 +179,10 @@ public class CreateColumnFamilyStatement
 
             if (CFMetaData.DEFAULT_COMPRESSOR != null && cfProps.compressionParameters.isEmpty())
                 cfProps.compressionParameters.put(CompressionParameters.SSTABLE_COMPRESSION, CFMetaData.DEFAULT_COMPRESSOR);
+            int maxCompactionThreshold = getPropertyInt(CFPropDefs.KW_MAXCOMPACTIONTHRESHOLD, CFMetaData.DEFAULT_MAX_COMPACTION_THRESHOLD);
+            int minCompactionThreshold = getPropertyInt(CFPropDefs.KW_MINCOMPACTIONTHRESHOLD, CFMetaData.DEFAULT_MIN_COMPACTION_THRESHOLD);
+            if (minCompactionThreshold <= 0 || maxCompactionThreshold <= 0)
+                throw new ConfigurationException("Disabling compaction by setting compaction thresholds to 0 has been deprecated, set the compaction option 'enabled' to false instead.");
 
             newCFMD.comment(cfProps.getProperty(CFPropDefs.KW_COMMENT))
                    .readRepairChance(getPropertyDouble(CFPropDefs.KW_READREPAIRCHANCE, CFMetaData.DEFAULT_READ_REPAIR_CHANCE))
@@ -186,8 +190,8 @@ public class CreateColumnFamilyStatement
                    .replicateOnWrite(getPropertyBoolean(CFPropDefs.KW_REPLICATEONWRITE, CFMetaData.DEFAULT_REPLICATE_ON_WRITE))
                    .gcGraceSeconds(getPropertyInt(CFPropDefs.KW_GCGRACESECONDS, CFMetaData.DEFAULT_GC_GRACE_SECONDS))
                    .defaultValidator(cfProps.getValidator())
-                   .minCompactionThreshold(getPropertyInt(CFPropDefs.KW_MINCOMPACTIONTHRESHOLD, CFMetaData.DEFAULT_MIN_COMPACTION_THRESHOLD))
-                   .maxCompactionThreshold(getPropertyInt(CFPropDefs.KW_MAXCOMPACTIONTHRESHOLD, CFMetaData.DEFAULT_MAX_COMPACTION_THRESHOLD))
+                   .minCompactionThreshold(minCompactionThreshold)
+                   .maxCompactionThreshold(maxCompactionThreshold)
                    .columnMetadata(getColumns(comparator))
                    .keyValidator(TypeParser.parse(CFPropDefs.comparators.get(getKeyType())))
                    .compactionStrategyClass(cfProps.compactionStrategyClass)
@@ -202,7 +206,7 @@ public class CreateColumnFamilyStatement
 
             // CQL2 can have null keyAliases
             if (keyAlias != null)
-                newCFMD.keyAliases(Collections.<ByteBuffer>singletonList(keyAlias));
+                newCFMD.addColumnDefinition(ColumnDefinition.partitionKeyDef(keyAlias, newCFMD.getKeyValidator(), null));
         }
         catch (ConfigurationException e)
         {
@@ -220,7 +224,7 @@ public class CreateColumnFamilyStatement
         return cfProps.getPropertyString(key, defaultValue);
     }
 
-    private Boolean getPropertyBoolean(String key, Boolean defaultValue) throws InvalidRequestException
+    private Boolean getPropertyBoolean(String key, Boolean defaultValue)
     {
         return cfProps.getPropertyBoolean(key, defaultValue);
     }
@@ -233,6 +237,11 @@ public class CreateColumnFamilyStatement
     private Integer getPropertyInt(String key, Integer defaultValue) throws InvalidRequestException
     {
         return cfProps.getPropertyInt(key, defaultValue);
+    }
+
+    private Set<String> getPropertySet(String key, Set<String> defaultValue)
+    {
+        return cfProps.getPropertySet(key, defaultValue);
     }
 
     public Map<Term, String> getColumns()

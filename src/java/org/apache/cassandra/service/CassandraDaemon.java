@@ -19,6 +19,7 @@ package org.apache.cassandra.service;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -26,23 +27,29 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+import javax.management.StandardMBean;
+
 import com.google.common.collect.Iterables;
 import com.google.common.collect.SetMultimap;
+
 import org.apache.log4j.PropertyConfigurator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.auth.Auth;
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.LegacyLeveledManifest;
+import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.thrift.ThriftServer;
+import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.CLibrary;
 import org.apache.cassandra.utils.Mx4jTool;
 import org.apache.cassandra.utils.Pair;
@@ -55,10 +62,22 @@ import org.apache.cassandra.utils.Pair;
  */
 public class CassandraDaemon
 {
+    public static final String MBEAN_NAME = "org.apache.cassandra.db:type=NativeAccess";
+    
     static
     {
         initLog4j();
     }
+
+    // Have a dedicated thread to call exit to avoid deadlock in the case where the thread that wants to invoke exit
+    // belongs to an executor that our shutdown hook wants to wait to exit gracefully. See CASSANDRA-5273.
+    private static final Thread exitThread = new Thread(new Runnable()
+    {
+        public void run()
+        {
+            System.exit(100);
+        }
+    }, "Exit invoker");
 
     /**
      * Initialize logging in such a way that it checks for config changes every 10 seconds.
@@ -122,7 +141,49 @@ public class CassandraDaemon
      */
     protected void setup()
     {
-        logger.info("JVM vendor/version: {}/{}", System.getProperty("java.vm.name"), System.getProperty("java.version") );
+        // log warnings for different kinds of sub-optimal JVMs.  tldr use 64-bit Oracle >= 1.6u32
+        if (!System.getProperty("os.arch").contains("64"))
+            logger.info("32bit JVM detected.  It is recommended to run Cassandra on a 64bit JVM for better performance.");
+        String javaVersion = System.getProperty("java.version");
+        String javaVmName = System.getProperty("java.vm.name");
+        logger.info("JVM vendor/version: {}/{}", javaVmName, javaVersion);
+        if (javaVmName.contains("OpenJDK"))
+        {
+            // There is essentially no QA done on OpenJDK builds, and
+            // clusters running OpenJDK have seen many heap and load issues.
+            logger.warn("OpenJDK is not recommended. Please upgrade to the newest Oracle Java release");
+        }
+        else if (!javaVmName.contains("HotSpot"))
+        {
+            logger.warn("Non-Oracle JVM detected.  Some features, such as immediate unmap of compacted SSTables, may not work as intended");
+        }
+        else
+        {
+            String[] java_version = javaVersion.split("_");
+            String java_major = java_version[0];
+            int java_minor;
+            try
+            {
+                java_minor = (java_version.length > 1) ? Integer.parseInt(java_version[1]) : 0;
+            }
+            catch (NumberFormatException e)
+            {
+                // have only seen this with java7 so far but no doubt there are other ways to break this
+                logger.info("Unable to parse java version {}", Arrays.toString(java_version));
+                java_minor = 32;
+            }
+            if (java_major.equals("1.6.0"))
+            {
+                // These need to be updated from time to time, but these are currently valid (12.18.2012)
+                if (java_minor < 29)
+                    // Seen to be a major contributing factor for heap and load issues
+                    logger.error("Your JVM is out of date. Please upgrade to the newest Oracle Java 6.");
+                else if (java_minor < 32)
+                    // Updates 32+ have been seen to work well enough in the wild
+                    logger.warn("Your JVM is out of date. Please upgrade to the newest Oracle Java 6.");
+            }
+        }
+
         logger.info("Heap size: {}/{}", Runtime.getRuntime().totalMemory(), Runtime.getRuntime().maxMemory());
         logger.info("Classpath: {}", System.getProperty("java.class.path"));
         CLibrary.tryMlockall();
@@ -133,11 +194,12 @@ public class CassandraDaemon
             {
                 exceptions.incrementAndGet();
                 logger.error("Exception in thread " + t, e);
+                Tracing.trace("Exception in thread " + t, e);
                 for (Throwable e2 = e; e2 != null; e2 = e2.getCause())
                 {
                     // some code, like FileChannel.map, will wrap an OutOfMemoryError in another exception
                     if (e2 instanceof OutOfMemoryError)
-                        System.exit(100);
+                        exitThread.start();
 
                     if (e2 instanceof FSError)
                     {
@@ -162,21 +224,17 @@ public class CassandraDaemon
                     : String.format("Directory %s is not accessible.", dataDir);
         }
 
-        // Migrate sstables from pre-#2749 to the correct location
-        if (Directories.sstablesNeedsMigration())
-            Directories.migrateSSTables();
-
         if (CacheService.instance == null) // should never happen
             throw new RuntimeException("Failed to initialize Cache Service.");
 
-        // check the system table to keep user from shooting self in foot by changing partitioner, cluster name, etc.
-        // we do a one-off scrub of the system table first; we can't load the list of the rest of the tables,
-        // until system table is opened.
-        for (CFMetaData cfm : Schema.instance.getTableMetaData(Table.SYSTEM_KS).values())
-            ColumnFamilyStore.scrubDataDirectories(Table.SYSTEM_KS, cfm.cfName);
+        // check the system keyspace to keep user from shooting self in foot by changing partitioner, cluster name, etc.
+        // we do a one-off scrub of the system keyspace first; we can't load the list of the rest of the keyspaces,
+        // until system keyspace is opened.
+        for (CFMetaData cfm : Schema.instance.getKeyspaceMetaData(Keyspace.SYSTEM_KS).values())
+            ColumnFamilyStore.scrubDataDirectories(Keyspace.SYSTEM_KS, cfm.cfName);
         try
         {
-            SystemTable.checkHealth();
+            SystemKeyspace.checkHealth();
         }
         catch (ConfigurationException e)
         {
@@ -185,42 +243,44 @@ public class CassandraDaemon
         }
 
         // load keyspace descriptions.
-        try
-        {
-            DatabaseDescriptor.loadSchemas();
-        }
-        catch (IOException e)
-        {
-            logger.error("Fatal exception during initialization", e);
-            System.exit(100);
-        }
+        DatabaseDescriptor.loadSchemas();
 
-        // setup Authenticator and Authorizer.
-        Auth.setup();
-
-        // clean up debris in the rest of the tables
-        for (String table : Schema.instance.getTables())
+        // clean up debris in the rest of the keyspaces
+        for (String keyspaceName : Schema.instance.getKeyspaces())
         {
-            for (CFMetaData cfm : Schema.instance.getTableMetaData(table).values())
+            for (CFMetaData cfm : Schema.instance.getKeyspaceMetaData(keyspaceName).values())
             {
-                ColumnFamilyStore.scrubDataDirectories(table, cfm.cfName);
+                if (LegacyLeveledManifest.manifestNeedsMigration(keyspaceName,cfm.cfName))
+                {
+                    try
+                    {
+                        LegacyLeveledManifest.migrateManifests(keyspaceName, cfm.cfName);
+                    }
+                    catch (IOException e)
+                    {
+                        logger.error("Could not migrate old leveled manifest. Move away the .json file in the data directory", e);
+                        System.exit(100);
+                    }
+                }
+
+                ColumnFamilyStore.scrubDataDirectories(keyspaceName, cfm.cfName);
             }
         }
         // clean up compaction leftovers
-        SetMultimap<Pair<String, String>, Integer> unfinishedCompactions = SystemTable.getUnfinishedCompactions();
+        SetMultimap<Pair<String, String>, Integer> unfinishedCompactions = SystemKeyspace.getUnfinishedCompactions();
         for (Pair<String, String> kscf : unfinishedCompactions.keySet())
         {
             ColumnFamilyStore.removeUnfinishedCompactionLeftovers(kscf.left, kscf.right, unfinishedCompactions.get(kscf));
         }
-        SystemTable.discardCompactionsInProgress();
+        SystemKeyspace.discardCompactionsInProgress();
 
         // initialize keyspaces
-        for (String table : Schema.instance.getTables())
+        for (String keyspaceName : Schema.instance.getKeyspaces())
         {
             if (logger.isDebugEnabled())
-                logger.debug("opening keyspace " + table);
+                logger.debug("opening keyspace " + keyspaceName);
             // disable auto compaction until commit log replay ends
-            for (ColumnFamilyStore cfs : Table.open(table).getColumnFamilyStores())
+            for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
             {
                 for (ColumnFamilyStore store : cfs.concatWithIndexes())
                 {
@@ -255,9 +315,9 @@ public class CassandraDaemon
         }
 
         // enable auto compaction
-        for (Table table : Table.all())
+        for (Keyspace keyspace : Keyspace.all())
         {
-            for (ColumnFamilyStore cfs : table.getColumnFamilyStores())
+            for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
             {
                 for (final ColumnFamilyStore store : cfs.concatWithIndexes())
                 {
@@ -270,9 +330,9 @@ public class CassandraDaemon
         {
             public void run()
             {
-                for (Table table : Table.all())
+                for (Keyspace keyspaceName : Keyspace.all())
                 {
-                    for (ColumnFamilyStore cf : table.getColumnFamilyStores())
+                    for (ColumnFamilyStore cf : keyspaceName.getColumnFamilyStores())
                     {
                         for (ColumnFamilyStore store : cf.concatWithIndexes())
                             CompactionManager.instance.submitBackground(store);
@@ -282,7 +342,10 @@ public class CassandraDaemon
         };
         StorageService.optionalTasks.schedule(runnable, 5 * 60, TimeUnit.SECONDS);
 
-        SystemTable.finishStartup();
+        // MeteredFlusher can block if flush queue fills up, so don't put on scheduledTasks
+        StorageService.optionalTasks.scheduleWithFixedDelay(new MeteredFlusher(), 1000, 1000, TimeUnit.MILLISECONDS);
+
+        SystemKeyspace.finishStartup();
 
         // start server internals
         StorageService.instance.registerDaemon(this);
@@ -336,13 +399,13 @@ public class CassandraDaemon
         if ((nativeFlag != null && Boolean.parseBoolean(nativeFlag)) || (nativeFlag == null && DatabaseDescriptor.startNativeTransport()))
             nativeServer.start();
         else
-            logger.info("Not starting native transport as requested. Use JMX (StorageService->startNativeTransport()) to start it");
+            logger.info("Not starting native transport as requested. Use JMX (StorageService->startNativeTransport()) or nodetool (enablebinary) to start it");
 
         String rpcFlag = System.getProperty("cassandra.start_rpc");
         if ((rpcFlag != null && Boolean.parseBoolean(rpcFlag)) || (rpcFlag == null && DatabaseDescriptor.startRpc()))
             thriftServer.start();
         else
-            logger.info("Not starting RPC server as requested. Use JMX (StorageService->startRPCServer()) to start it");
+            logger.info("Not starting RPC server as requested. Use JMX (StorageService->startRPCServer()) or nodetool (enablethrift) to start it");
     }
 
     /**
@@ -376,6 +439,17 @@ public class CassandraDaemon
 
         try
         {
+            try
+            {
+                MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+                mbs.registerMBean(new StandardMBean(new NativeAccess(), NativeAccessMBean.class), new ObjectName(MBEAN_NAME));
+            }
+            catch (Exception e)
+            {
+                logger.error("error registering MBean " + MBEAN_NAME, e);
+                //Allow the server to start even if the bean can't be registered
+            }
+            
             setup();
 
             if (pidFile != null)
@@ -420,6 +494,19 @@ public class CassandraDaemon
     public static void main(String[] args)
     {
         instance.activate();
+    }
+    
+    static class NativeAccess implements NativeAccessMBean
+    {
+        public boolean isAvailable()
+        {
+            return CLibrary.jnaAvailable();
+        }
+        
+        public boolean isMemoryLockable() 
+        {
+            return CLibrary.jnaMemoryLockable();
+        }
     }
 
     public interface Server

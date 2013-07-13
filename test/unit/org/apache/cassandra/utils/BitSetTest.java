@@ -19,23 +19,20 @@ package org.apache.cassandra.utils;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Random;
 
-import junit.framework.Assert;
+import com.google.common.collect.Lists;
+import org.junit.Test;
 
+import junit.framework.Assert;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.utils.KeyGenerator.WordGenerator;
 import org.apache.cassandra.utils.obs.IBitSet;
 import org.apache.cassandra.utils.obs.OffHeapBitSet;
 import org.apache.cassandra.utils.obs.OpenBitSet;
-import org.junit.Test;
-
-import com.google.common.collect.Lists;
 
 import static junit.framework.Assert.assertEquals;
 
@@ -65,25 +62,6 @@ public class BitSetTest
         compare(bf2.bitset, bf3.bitset);
     }
 
-    private static final String LEGACY_SST_FILE = "test/data/legacy-sstables/hb/Keyspace1/Keyspace1-Standard1-hb-0-Filter.db";
-
-    /**
-     * Test compatibility with a 1.1-version data file
-     */
-    @Test
-    public void testExpectedCompatablity() throws IOException
-    {
-        DataInputStream dis = new DataInputStream(new FileInputStream(new File(LEGACY_SST_FILE)));
-        dis.readInt(); // bloom filter hash count
-        OpenBitSet bs = OpenBitSet.deserialize(dis);
-
-        dis = new DataInputStream(new FileInputStream(new File(LEGACY_SST_FILE)));
-        dis.readInt(); // bloom filter hash count
-        OffHeapBitSet obs = OffHeapBitSet.deserialize(dis);
-
-        compare(obs, bs);
-    }
-
     private static final Random random = new Random();
 
     /**
@@ -109,10 +87,10 @@ public class BitSetTest
             if (random.nextBoolean())
                 bs.set(i);
 
-        DataOutputBuffer dos = new DataOutputBuffer();
-        bs.serialize(dos);
-        DataInputStream dis = new DataInputStream(new ByteArrayInputStream(dos.getData()));
-        OffHeapBitSet newbs = OffHeapBitSet.deserialize(dis);
+        DataOutputBuffer out = new DataOutputBuffer();
+        bs.serialize(out);
+        DataInputStream in = new DataInputStream(new ByteArrayInputStream(out.getData()));
+        OffHeapBitSet newbs = OffHeapBitSet.deserialize(in);
         compare(bs, newbs);
     }
 

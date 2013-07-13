@@ -28,23 +28,24 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DeletionInfo;
+import org.apache.cassandra.db.TreeMapBackedSortedColumns;
 
 import static junit.framework.Assert.*;
 import static org.apache.cassandra.Util.column;
-import static org.apache.cassandra.db.TableTest.*;
+import static org.apache.cassandra.db.KeyspaceTest.*;
 
 public class RowResolverTest extends SchemaLoader
 {
     @Test
     public void testResolveSupersetNewer()
     {
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.addColumn(column("c1", "v1", 0));
 
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf2.addColumn(column("c1", "v2", 1));
 
-        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2));
+        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2), System.currentTimeMillis());
         assertColumns(resolved, "c1");
         assertColumns(ColumnFamily.diff(cf1, resolved), "c1");
         assertNull(ColumnFamily.diff(cf2, resolved));
@@ -53,13 +54,13 @@ public class RowResolverTest extends SchemaLoader
     @Test
     public void testResolveSupersetDisjoint()
     {
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.addColumn(column("c1", "v1", 0));
 
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf2.addColumn(column("c2", "v2", 1));
 
-        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2));
+        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2), System.currentTimeMillis());
         assertColumns(resolved, "c1", "c2");
         assertColumns(ColumnFamily.diff(cf1, resolved), "c2");
         assertColumns(ColumnFamily.diff(cf2, resolved), "c1");
@@ -68,10 +69,10 @@ public class RowResolverTest extends SchemaLoader
     @Test
     public void testResolveSupersetNullOne()
     {
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf2.addColumn(column("c2", "v2", 1));
 
-        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(null, cf2));
+        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(null, cf2), System.currentTimeMillis());
         assertColumns(resolved, "c2");
         assertColumns(ColumnFamily.diff(null, resolved), "c2");
         assertNull(ColumnFamily.diff(cf2, resolved));
@@ -80,10 +81,10 @@ public class RowResolverTest extends SchemaLoader
     @Test
     public void testResolveSupersetNullTwo()
     {
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.addColumn(column("c1", "v1", 0));
 
-        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, null));
+        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, null), System.currentTimeMillis());
         assertColumns(resolved, "c1");
         assertNull(ColumnFamily.diff(cf1, resolved));
         assertColumns(ColumnFamily.diff(null, resolved), "c1");
@@ -92,20 +93,20 @@ public class RowResolverTest extends SchemaLoader
     @Test
     public void testResolveSupersetNullBoth()
     {
-        assertNull(RowDataResolver.resolveSuperset(Arrays.<ColumnFamily>asList(null, null)));
+        assertNull(RowDataResolver.resolveSuperset(Arrays.<ColumnFamily>asList(null, null), System.currentTimeMillis()));
     }
 
     @Test
     public void testResolveDeleted()
     {
         // one CF with columns timestamped before a delete in another cf
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.addColumn(column("one", "A", 0));
 
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf2.delete(new DeletionInfo(1L, (int) (System.currentTimeMillis() / 1000)));
 
-        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2));
+        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2), System.currentTimeMillis());
         // no columns in the cf
         assertColumns(resolved);
         assertTrue(resolved.isMarkedForDelete());
@@ -117,22 +118,22 @@ public class RowResolverTest extends SchemaLoader
     {
         // deletes and columns with interleaved timestamp, with out of order return sequence
 
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.delete(new DeletionInfo(0L, (int) (System.currentTimeMillis() / 1000)));
 
         // these columns created after the previous deletion
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf2.addColumn(column("one", "A", 1));
         cf2.addColumn(column("two", "A", 1));
 
         //this column created after the next delete
-        ColumnFamily cf3 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf3 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf3.addColumn(column("two", "B", 3));
 
-        ColumnFamily cf4 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf4 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf4.delete(new DeletionInfo(2L, (int) (System.currentTimeMillis() / 1000)));
 
-        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2, cf3, cf4));
+        ColumnFamily resolved = RowDataResolver.resolveSuperset(Arrays.asList(cf1, cf2, cf3, cf4), System.currentTimeMillis());
         // will have deleted marker and one column
         assertColumns(resolved, "two");
         assertColumn(resolved, "two", "B", 3);

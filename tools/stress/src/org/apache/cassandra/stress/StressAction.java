@@ -20,11 +20,15 @@ package org.apache.cassandra.stress;
 import java.io.PrintStream;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.TimeUnit;
 
+import com.google.common.util.concurrent.Uninterruptibles;
+import com.google.common.util.concurrent.RateLimiter;
 import com.yammer.metrics.stats.Snapshot;
 import org.apache.cassandra.stress.operations.*;
 import org.apache.cassandra.stress.util.CassandraClient;
 import org.apache.cassandra.stress.util.Operation;
+import org.apache.cassandra.transport.SimpleClient;
 
 public class StressAction extends Thread
 {
@@ -66,13 +70,14 @@ public class StressAction extends Thread
 
         int itemsPerThread = client.getKeysPerThread();
         int modulo = client.getNumKeys() % threadCount;
+        RateLimiter rateLimiter = RateLimiter.create(client.getMaxOpsPerSecond());
 
         // creating required type of the threads for the test
         for (int i = 0; i < threadCount; i++) {
             if (i == threadCount - 1)
                 itemsPerThread += modulo; // last one is going to handle N + modulo items
 
-            consumers[i] = new Consumer(itemsPerThread);
+            consumers[i] = new Consumer(itemsPerThread, rateLimiter);
         }
 
         Producer producer = new Producer();
@@ -88,7 +93,7 @@ public class StressAction extends Thread
 
         int interval = client.getProgressInterval();
         int epochIntervals = client.getProgressInterval() * 10;
-        long testStartTime = System.currentTimeMillis();
+        long testStartTime = System.nanoTime();
         
         StressStatistics stats = new StressStatistics(client, output);
 
@@ -104,14 +109,7 @@ public class StressAction extends Thread
                 break;
             }
 
-            try
-            {
-                Thread.sleep(100);
-            }
-            catch (InterruptedException e)
-            {
-                throw new RuntimeException(e.getMessage(), e);
-            }
+            Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
 
             int alive = 0;
             for (Thread thread : consumers)
@@ -136,7 +134,7 @@ public class StressAction extends Thread
                 int opDelta = total - oldTotal;
                 int keyDelta = keyCount - oldKeyCount;
 
-                long currentTimeInSeconds = (System.currentTimeMillis() - testStartTime) / 1000;
+                long currentTimeInSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - testStartTime);
 
                 output.println(String.format("%d,%d,%d,%.1f,%.1f,%.1f,%d",
                                              total,
@@ -221,39 +219,74 @@ public class StressAction extends Thread
     private class Consumer extends Thread
     {
         private final int items;
+        private final RateLimiter rateLimiter;
         private volatile boolean stop = false;
         private volatile int returnCode = StressAction.SUCCESS;
 
-        public Consumer(int toConsume)
+        public Consumer(int toConsume, RateLimiter rateLimiter)
         {
             items = toConsume;
+            this.rateLimiter = rateLimiter;
         }
 
         public void run()
         {
-            CassandraClient connection = client.getClient();
-
-            for (int i = 0; i < items; i++)
+            if (client.use_native_protocol)
             {
-                if (stop)
-                    break;
+                SimpleClient connection = client.getNativeClient();
 
-                try
+                for (int i = 0; i < items; i++)
                 {
-                    operations.take().run(connection); // running job
-                }
-                catch (Exception e)
-                {
-                    if (output == null)
+                    if (stop)
+                        break;
+
+                    try
                     {
-                        System.err.println(e.getMessage());
-                        returnCode = StressAction.FAILURE;
-                        System.exit(-1);
+                        rateLimiter.acquire();
+                        operations.take().run(connection); // running job
                     }
+                    catch (Exception e)
+                    {
+                        if (output == null)
+                        {
+                            System.err.println(e.getMessage());
+                            returnCode = StressAction.FAILURE;
+                            System.exit(-1);
+                        }
 
-                    output.println(e.getMessage());
-                    returnCode = StressAction.FAILURE;
-                    break;
+                        output.println(e.getMessage());
+                        returnCode = StressAction.FAILURE;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                CassandraClient connection = client.getClient();
+
+                for (int i = 0; i < items; i++)
+                {
+                    if (stop)
+                        break;
+
+                    try
+                    {
+                        rateLimiter.acquire();
+                        operations.take().run(connection); // running job
+                    }
+                    catch (Exception e)
+                    {
+                        if (output == null)
+                        {
+                            System.err.println(e.getMessage());
+                            returnCode = StressAction.FAILURE;
+                            System.exit(-1);
+                        }
+
+                        output.println(e.getMessage());
+                        returnCode = StressAction.FAILURE;
+                        break;
+                    }
                 }
             }
         }

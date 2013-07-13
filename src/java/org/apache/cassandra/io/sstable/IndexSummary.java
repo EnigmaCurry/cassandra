@@ -17,117 +17,121 @@
  */
 package org.apache.cassandra.io.sstable;
 
-import java.io.DataInput;
-import java.io.DataOutput;
+import java.io.Closeable;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
 
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.RowPosition;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.io.util.Memory;
+import org.apache.cassandra.io.util.MemoryInputStream;
+import org.apache.cassandra.io.util.MemoryOutputStream;
+import org.apache.cassandra.utils.FBUtilities;
 
-/**
- * Two approaches to building an IndexSummary:
- * 1. Call maybeAddEntry with every potential index entry
- * 2. Call shouldAddEntry, [addEntry,] incrementRowid
- */
-public class IndexSummary
+public class IndexSummary implements Closeable
 {
     public static final IndexSummarySerializer serializer = new IndexSummarySerializer();
-    private final ArrayList<Long> positions;
-    private final ArrayList<DecoratedKey> keys;
-    private long keysWritten = 0;
-    private int indexInterval;
+    private final int indexInterval;
+    private final IPartitioner partitioner;
+    private final int summary_size;
+    private final Memory bytes;
 
-    private IndexSummary()
+    public IndexSummary(IPartitioner partitioner, Memory memory, int summary_size, int indexInterval)
     {
-        positions = new ArrayList<Long>();
-        keys = new ArrayList<DecoratedKey>();
-    }
-
-    public IndexSummary(long expectedKeys, int indexInterval)
-    {
-        long expectedEntries = expectedKeys / indexInterval;
-        if (expectedEntries > Integer.MAX_VALUE)
-            // TODO: that's a _lot_ of keys, or a very low interval
-            throw new RuntimeException("Cannot use index_interval of " + indexInterval + " with " + expectedKeys + " (expected) keys.");
-        positions = new ArrayList<Long>((int)expectedEntries);
-        keys = new ArrayList<DecoratedKey>((int)expectedEntries);
+        this.partitioner = partitioner;
         this.indexInterval = indexInterval;
+        this.summary_size = summary_size;
+        this.bytes = memory;
     }
 
-    public void incrementRowid()
+    // binary search is notoriously more difficult to get right than it looks; this is lifted from
+    // Harmony's Collections implementation
+    public int binarySearch(RowPosition key)
     {
-        keysWritten++;
+        int low = 0, mid = summary_size, high = mid - 1, result = -1;
+        while (low <= high)
+        {
+            mid = (low + high) >> 1;
+            result = -DecoratedKey.compareTo(partitioner, ByteBuffer.wrap(getKey(mid)), key);
+            if (result > 0)
+            {
+                low = mid + 1;
+            }
+            else if (result == 0)
+            {
+                return mid;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        return -mid - (result < 0 ? 1 : 2);
     }
 
-    public boolean shouldAddEntry()
+    public int getIndex(int index)
     {
-        return keysWritten % indexInterval == 0;
+        // multiply by 4.
+        return bytes.getInt(index << 2);
     }
 
-    public void addEntry(DecoratedKey key, long indexPosition)
+    public byte[] getKey(int index)
     {
-        keys.add(SSTable.getMinimalKey(key));
-        positions.add(indexPosition);
-    }
-
-    public void maybeAddEntry(DecoratedKey decoratedKey, long indexPosition)
-    {
-        if (shouldAddEntry())
-            addEntry(decoratedKey, indexPosition);
-        incrementRowid();
-    }
-
-    public List<DecoratedKey> getKeys()
-    {
-        return keys;
+        long start = getIndex(index);
+        int keySize = (int) (caclculateEnd(index) - start - 8L);
+        byte[] key = new byte[keySize];
+        bytes.getBytes(start, key, 0, keySize);
+        return key;
     }
 
     public long getPosition(int index)
     {
-        return positions.get(index);
+        return bytes.getLong(caclculateEnd(index) - 8);
     }
 
-    public int getIndexInterval() {
+    private long caclculateEnd(int index)
+    {
+        return index == (summary_size - 1) ? bytes.size() : getIndex(index + 1);
+    }
+
+    public int getIndexInterval()
+    {
         return indexInterval;
     }
 
-	public void complete()
+    public int size()
     {
-        keys.trimToSize();
-        positions.trimToSize();
+        return summary_size;
     }
 
     public static class IndexSummarySerializer
     {
-        public void serialize(IndexSummary t, DataOutput dos) throws IOException
+        public void serialize(IndexSummary t, DataOutputStream out) throws IOException
         {
-            assert t.keys.size() == t.positions.size() : "keysize and the position sizes are not same.";
-            dos.writeInt(t.indexInterval);
-            dos.writeInt(t.keys.size());
-            for (int i = 0; i < t.keys.size(); i++)
-            {
-                dos.writeLong(t.positions.get(i));
-                ByteBufferUtil.writeWithLength(t.keys.get(i).key, dos);
-            }
+            out.writeInt(t.indexInterval);
+            out.writeInt(t.summary_size);
+            out.writeLong(t.bytes.size());
+            FBUtilities.copy(new MemoryInputStream(t.bytes), out, t.bytes.size());
         }
 
-        public IndexSummary deserialize(DataInput dis, IPartitioner partitioner) throws IOException
+        public IndexSummary deserialize(DataInputStream in, IPartitioner partitioner) throws IOException
         {
-            IndexSummary summary = new IndexSummary();
-            summary.indexInterval = dis.readInt();
-
-            int size = dis.readInt();
-            for (int i = 0; i < size; i++)
-            {
-                long location = dis.readLong();
-                ByteBuffer key = ByteBufferUtil.readWithLength(dis);
-                summary.addEntry(partitioner.decorateKey(key), location);
-            }
-            return summary;
+            int indexInterval = in.readInt();
+            int summary_size = in.readInt();
+            long offheap_size = in.readLong();
+            Memory memory = Memory.allocate(offheap_size);
+            FBUtilities.copy(in, new MemoryOutputStream(memory), offheap_size);
+            return new IndexSummary(partitioner, memory, summary_size, indexInterval);
         }
+    }
+
+    @Override
+    public void close() throws IOException
+    {
+        bytes.free();
     }
 }

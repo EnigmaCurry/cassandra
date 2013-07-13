@@ -198,7 +198,7 @@ public class CliMain
         completer.setCandidateStrings(strs);
     }
 
-    public static void processStatement(String query) throws CharacterCodingException, ClassNotFoundException, TException, TimedOutException, NotFoundException, InvalidRequestException, NoSuchFieldException, UnavailableException, IllegalAccessException, InstantiationException
+    public static void processStatement(String query) throws CharacterCodingException, TException, TimedOutException, NotFoundException, InvalidRequestException, NoSuchFieldException, UnavailableException, IllegalAccessException, InstantiationException
     {
         cliClient.executeCLIStatement(query);
     }
@@ -266,14 +266,14 @@ public class CliMain
             try
             {
                 fileReader = new FileReader(sessionState.filename);
+                evaluateFileStatements(new BufferedReader(fileReader));
             }
             catch (IOException e)
             {
                 sessionState.err.println(e.getMessage());
-                return;
+                System.exit(1);
             }
 
-            evaluateFileStatements(new BufferedReader(fileReader));
             return;
         }
 

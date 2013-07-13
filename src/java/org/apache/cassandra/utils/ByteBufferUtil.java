@@ -396,6 +396,14 @@ public class ByteBufferUtil
         return ByteBuffer.wrap(buff);
     }
 
+    public static byte[] readBytes(DataInput in, int length) throws IOException
+    {
+        assert length > 0;
+        byte[] bytes = new byte[length];
+        in.readFully(bytes);
+        return bytes;
+    }
+
     /**
      * Convert a byte buffer to an integer.
      * Does not change the byte buffer position.
@@ -533,5 +541,15 @@ public class ByteBufferUtil
     public static ByteBuffer bytes(UUID uuid)
     {
         return ByteBuffer.wrap(UUIDGen.decompose(uuid));
+    }
+
+    // Returns whether {@code prefix} is a prefix of {@code value}.
+    public static boolean isPrefix(ByteBuffer prefix, ByteBuffer value)
+    {
+        if (prefix.remaining() > value.remaining())
+            return false;
+
+        int diff = value.remaining() - prefix.remaining();
+        return prefix.equals(value.duplicate().limit(value.remaining() - diff));
     }
 }

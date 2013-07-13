@@ -30,15 +30,13 @@ import org.apache.cassandra.io.util.FileDataInput;
 /**
  *  A Column Iterator over SSTable
  */
-public class SSTableSliceIterator implements ISSTableColumnIterator
+public class SSTableSliceIterator implements OnDiskAtomIterator
 {
     private final OnDiskAtomIterator reader;
     private final DecoratedKey key;
-    private final SSTableReader sstable;
 
     public SSTableSliceIterator(SSTableReader sstable, DecoratedKey key, ColumnSlice[] slices, boolean reversed)
     {
-        this.sstable = sstable;
         this.key = key;
         RowIndexEntry indexEntry = sstable.getPosition(key, SSTableReader.Operator.EQ);
         this.reader = indexEntry == null ? null : createReader(sstable, indexEntry, null, slices, reversed);
@@ -46,7 +44,7 @@ public class SSTableSliceIterator implements ISSTableColumnIterator
 
     /**
      * An iterator for a slice within an SSTable
-     * @param sstable Table for the CFS we are reading from
+     * @param sstable Keyspace for the CFS we are reading from
      * @param file Optional parameter that input is read from.  If null is passed, this class creates an appropriate one automatically.
      * If this class creates, it will close the underlying file when #close() is called.
      * If a caller passes a non-null argument, this class will NOT close the underlying file when the iterator is closed (i.e. the caller is responsible for closing the file)
@@ -58,7 +56,6 @@ public class SSTableSliceIterator implements ISSTableColumnIterator
      */
     public SSTableSliceIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, ColumnSlice[] slices, boolean reversed, RowIndexEntry indexEntry)
     {
-        this.sstable = sstable;
         this.key = key;
         reader = createReader(sstable, indexEntry, file, slices, reversed);
     }
@@ -68,11 +65,6 @@ public class SSTableSliceIterator implements ISSTableColumnIterator
         return slices.length == 1 && slices[0].start.remaining() == 0 && !reversed
              ? new SimpleSliceReader(sstable, indexEntry, file, slices[0].finish)
              : new IndexedSliceReader(sstable, indexEntry, file, slices, reversed);
-    }
-
-    public SSTableReader getSStable()
-    {
-        return sstable;
     }
 
     public DecoratedKey getKey()

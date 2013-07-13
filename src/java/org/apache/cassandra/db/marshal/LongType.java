@@ -19,8 +19,10 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.cql.jdbc.JdbcLong;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.LongSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class LongType extends AbstractType<Long>
@@ -29,17 +31,12 @@ public class LongType extends AbstractType<Long>
 
     LongType() {} // singleton
 
-    public Long compose(ByteBuffer bytes)
-    {
-        return JdbcLong.instance.compose(bytes);
-    }
-
-    public ByteBuffer decompose(Long value)
-    {
-        return JdbcLong.instance.decompose(value);
-    }
-
     public int compare(ByteBuffer o1, ByteBuffer o2)
+    {
+        return compareLongs(o1, o2);
+    }
+
+    public static int compareLongs(ByteBuffer o1, ByteBuffer o2)
     {
         if (o1.remaining() == 0)
         {
@@ -50,24 +47,11 @@ public class LongType extends AbstractType<Long>
             return 1;
         }
 
-        int diff = o1.get(o1.position()) - o2.get(o2.position());
+        int diff = o1.get(o1.position() + o1.arrayOffset()) - o2.get(o2.position() + o2.arrayOffset());
         if (diff != 0)
             return diff;
 
-
         return ByteBufferUtil.compareUnsigned(o1, o2);
-    }
-
-    public String getString(ByteBuffer bytes)
-    {
-        try
-        {
-            return JdbcLong.instance.getString(bytes);
-        }
-        catch (org.apache.cassandra.cql.jdbc.MarshalException e)
-        {
-            throw new MarshalException(e.getMessage());
-        }
     }
 
     public ByteBuffer fromString(String source) throws MarshalException
@@ -90,14 +74,13 @@ public class LongType extends AbstractType<Long>
         return decompose(longType);
     }
 
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        if (bytes.remaining() != 8 && bytes.remaining() != 0)
-            throw new MarshalException(String.format("Expected 8 or 0 byte long (%d)", bytes.remaining()));
-    }
-
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.BIGINT;
+    }
+
+    public TypeSerializer<Long> getSerializer()
+    {
+        return LongSerializer.instance;
     }
 }

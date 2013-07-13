@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+import com.google.common.base.Strings;
 import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,6 +34,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.commons.lang.StringUtils;
 
 public class CFPropDefs {
     private static final Logger logger = LoggerFactory.getLogger(CFPropDefs.class);
@@ -236,7 +238,7 @@ public class CFPropDefs {
     }
 
     // Return a property value, typed as a Boolean
-    public Boolean getPropertyBoolean(String key, Boolean defaultValue) throws InvalidRequestException
+    public Boolean getPropertyBoolean(String key, Boolean defaultValue)
     {
         String value = properties.get(key);
         return (value == null) ? defaultValue : value.toLowerCase().matches("(1|true|yes)");
@@ -284,6 +286,14 @@ public class CFPropDefs {
             }
         }
         return result;
+    }
+
+    public Set<String> getPropertySet(String key, Set<String> defaultValue)
+    {
+        String value = properties.get(key);
+        if (Strings.isNullOrEmpty(value))
+            return defaultValue;
+        return Sets.newHashSet(StringUtils.split(value, ','));
     }
 
     public String toString()

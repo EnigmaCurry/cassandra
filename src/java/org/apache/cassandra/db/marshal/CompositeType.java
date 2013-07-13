@@ -27,13 +27,14 @@ import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
 
+import org.apache.cassandra.db.filter.ColumnSlice;
+import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.cql3.ColumnNameBuilder;
 import org.apache.cassandra.cql3.Relation;
-import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /*
@@ -148,6 +149,25 @@ public class CompositeType extends AbstractCompositeType
         return null;
     }
 
+    // Extract CQL3 column name from the full column name.
+    public ByteBuffer extractLastComponent(ByteBuffer bb)
+    {
+        int idx = types.get(types.size() - 1) instanceof ColumnToCollectionType ? types.size() - 2 : types.size() - 1;
+        return extractComponent(bb, idx);
+    }
+
+    @Override
+    public int componentsCount()
+    {
+        return types.size();
+    }
+
+    @Override
+    public List<AbstractType<?>> getComponents()
+    {
+        return types;
+    }
+
     @Override
     public boolean isCompatibleWith(AbstractType<?> previous)
     {
@@ -168,6 +188,26 @@ public class CompositeType extends AbstractCompositeType
             AbstractType tnew = types.get(i);
             if (!tnew.isCompatibleWith(tprev))
                 return false;
+        }
+        return true;
+    }
+
+    @Override
+    public boolean intersects(List<ByteBuffer> minColumnNames, List<ByteBuffer> maxColumnNames, SliceQueryFilter filter)
+    {
+        assert minColumnNames.size() == maxColumnNames.size();
+        for (ColumnSlice slice : filter.slices)
+        {
+            ByteBuffer[] start = split(filter.isReversed() ? slice.finish : slice.start);
+            ByteBuffer[] finish = split(filter.isReversed() ? slice.start : slice.finish);
+            for (int i = 0; i < minColumnNames.size(); i++)
+            {
+                AbstractType<?> t = types.get(i);
+                ByteBuffer s = i < start.length ? start[i] : ByteBufferUtil.EMPTY_BYTE_BUFFER;
+                ByteBuffer f = i < finish.length ? finish[i] : ByteBufferUtil.EMPTY_BYTE_BUFFER;
+                if (!t.intersects(minColumnNames.get(i), maxColumnNames.get(i), s, f))
+                    return false;
+            }
         }
         return true;
     }
@@ -305,6 +345,11 @@ public class CompositeType extends AbstractCompositeType
             return composite.types.size() - components.size();
         }
 
+        public ByteBuffer get(int i)
+        {
+            return components.get(i);
+        }
+
         public ByteBuffer build()
         {
             DataOutputBuffer out = new DataOutputBuffer(serializedSize);
@@ -336,6 +381,14 @@ public class CompositeType extends AbstractCompositeType
         public Builder copy()
         {
             return new Builder(this);
+        }
+
+        public ByteBuffer getComponent(int i)
+        {
+            if (i >= components.size())
+                throw new IllegalArgumentException();
+
+            return components.get(i);
         }
     }
 }

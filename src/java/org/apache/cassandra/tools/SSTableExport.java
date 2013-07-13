@@ -17,53 +17,29 @@
  */
 package org.apache.cassandra.tools;
 
-import static org.apache.cassandra.utils.ByteBufferUtil.bytesToHex;
-import static org.apache.cassandra.utils.ByteBufferUtil.hexToBytes;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
+import org.apache.commons.cli.*;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.AbstractColumnContainer;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.CounterColumn;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletedColumn;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.ExpiringColumn;
-import org.apache.cassandra.db.Column;
-import org.apache.cassandra.db.OnDiskAtom;
-import org.apache.cassandra.db.RangeTombstone;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.KeyIterator;
-import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
-import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.sstable.SSTableScanner;
+import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.codehaus.jackson.JsonGenerator;
 import org.codehaus.jackson.map.ObjectMapper;
+
+import static org.apache.cassandra.utils.ByteBufferUtil.bytesToHex;
+import static org.apache.cassandra.utils.ByteBufferUtil.hexToBytes;
 
 /**
  * Export SSTables to JSON format.
@@ -99,9 +75,20 @@ public class SSTableExport
     }
 
     /**
+     * Checks if PrintStream error and throw exception
+     *
+     * @param out The PrintStream to be check
+     */
+    private static void checkStream(PrintStream out) throws IOException
+    {
+        if (out.checkError())
+            throw new IOException("Error writing output stream");
+    }
+
+    /**
      * JSON Hash Key serializer
      *
-     * @param out The output steam to write data
+     * @param out   The output steam to write data
      * @param value value to set as a key
      */
     private static void writeKey(PrintStream out, String value)
@@ -116,24 +103,17 @@ public class SSTableExport
      * <li>column family deletion info (if present)</li>
      * </ul>
      *
-     * @param out
-     *            The output steam to write data
-     * @param columnFamily
-     *            to which the metadata belongs
+     * @param out The output steam to write data
+     * @param deletionInfo
      */
-    private static void writeMeta(PrintStream out, AbstractColumnContainer columnContainer)
+    private static void writeMeta(PrintStream out, DeletionInfo deletionInfo)
     {
-        if (columnContainer instanceof ColumnFamily)
+        if (!deletionInfo.isLive())
         {
-            ColumnFamily columnFamily = (ColumnFamily) columnContainer;
-            if (!columnFamily.deletionInfo().equals(DeletionInfo.LIVE))
-            {
-                // begin meta
-                writeKey(out, "metadata");
-                writeDeletionInfo(out, columnFamily.deletionInfo().getTopLevelDeletion());
-                out.print(",");
-            }
-            return;
+            // begin meta
+            writeKey(out, "metadata");
+            writeDeletionInfo(out, deletionInfo.getTopLevelDeletion());
+            out.print(",");
         }
     }
 
@@ -149,43 +129,32 @@ public class SSTableExport
     /**
      * Serialize columns using given column iterator
      *
-     * @param columns column iterator
-     * @param out output stream
-     * @param comparator columns comparator
+     * @param atoms      column iterator
+     * @param out        output stream
      * @param cfMetaData Column Family metadata (to get validator)
      */
-    private static void serializeAtoms(Iterator<OnDiskAtom> atoms, PrintStream out, AbstractType<?> comparator, CFMetaData cfMetaData)
+    private static void serializeAtoms(Iterator<OnDiskAtom> atoms, PrintStream out, CFMetaData cfMetaData)
     {
         while (atoms.hasNext())
         {
-            writeJSON(out, serializeAtom(atoms.next(), comparator, cfMetaData));
+            writeJSON(out, serializeAtom(atoms.next(), cfMetaData));
 
             if (atoms.hasNext())
                 out.print(", ");
         }
     }
 
-    private static void serializeColumns(Iterator<Column> columns, PrintStream out, AbstractType<?> comparator, CFMetaData cfMetaData)
+    private static List<Object> serializeAtom(OnDiskAtom atom, CFMetaData cfMetaData)
     {
-        while (columns.hasNext())
-        {
-            writeJSON(out, serializeColumn(columns.next(), comparator, cfMetaData));
-
-            if (columns.hasNext())
-                out.print(", ");
-        }
-    }
-
-    private static List<Object> serializeAtom(OnDiskAtom atom, AbstractType<?> comparator, CFMetaData cfMetaData)
-    {
+        AbstractType<?> comparator = cfMetaData.comparator;
         if (atom instanceof Column)
         {
-            return serializeColumn((Column)atom, comparator, cfMetaData);
+            return serializeColumn((Column) atom, comparator, cfMetaData);
         }
         else
         {
             assert atom instanceof RangeTombstone;
-            RangeTombstone rt = (RangeTombstone)atom;
+            RangeTombstone rt = (RangeTombstone) atom;
             ArrayList<Object> serializedColumn = new ArrayList<Object>();
             serializedColumn.add(comparator.getString(rt.min));
             serializedColumn.add(comparator.getString(rt.max));
@@ -199,10 +168,9 @@ public class SSTableExport
     /**
      * Serialize a given column to the JSON format
      *
-     * @param column column presentation
+     * @param column     column presentation
      * @param comparator columns comparator
      * @param cfMetaData Column Family metadata (to get validator)
-     *
      * @return column as serialized list
      */
     private static List<Object> serializeColumn(Column column, AbstractType<?> comparator, CFMetaData cfMetaData)
@@ -245,27 +213,29 @@ public class SSTableExport
 
     /**
      * Get portion of the columns and serialize in loop while not more columns left in the row
+     *
      * @param row SSTableIdentityIterator row representation with Column Family
      * @param key Decorated Key for the required row
      * @param out output stream
      */
     private static void serializeRow(SSTableIdentityIterator row, DecoratedKey key, PrintStream out)
     {
-        ColumnFamily columnFamily = row.getColumnFamily();
-        CFMetaData cfMetaData = columnFamily.metadata();
-        AbstractType<?> comparator = columnFamily.getComparator();
+        serializeRow(row.getColumnFamily().deletionInfo(), row, row.getColumnFamily().metadata(), key, out);
+    }
 
+    private static void serializeRow(DeletionInfo deletionInfo, Iterator<OnDiskAtom> atoms, CFMetaData metadata, DecoratedKey key, PrintStream out)
+    {
         out.print("{");
         writeKey(out, "key");
         writeJSON(out, bytesToHex(key.key));
         out.print(",");
 
-        writeMeta(out, columnFamily);
+        writeMeta(out, deletionInfo);
 
         writeKey(out, "columns");
         out.print("[");
 
-        serializeAtoms(row, out, comparator, cfMetaData);
+        serializeAtoms(atoms, out, metadata);
 
         out.print("]");
         out.print("}");
@@ -288,31 +258,31 @@ public class SSTableExport
             DecoratedKey key = iter.next();
 
             // validate order of the keys in the sstable
-            if (lastKey != null && lastKey.compareTo(key) > 0 )
+            if (lastKey != null && lastKey.compareTo(key) > 0)
                 throw new IOException("Key out of order! " + lastKey + " > " + key);
             lastKey = key;
 
             outs.println(bytesToHex(key.key));
+            checkStream(outs); // flushes
         }
         iter.close();
-        outs.flush();
     }
 
     /**
      * Export specific rows from an SSTable and write the resulting JSON to a PrintStream.
      *
-     * @param desc the descriptor of the sstable table to read from
-     * @param outs PrintStream to write the output to
+     * @param desc     the descriptor of the sstable to read from
+     * @param outs     PrintStream to write the output to
      * @param toExport the keys corresponding to the rows to export
      * @param excludes keys to exclude from export
      * @throws IOException on failure to read/write input/output
      */
     public static void export(Descriptor desc, PrintStream outs, Collection<String> toExport, String[] excludes) throws IOException
     {
-        SSTableReader reader = SSTableReader.open(desc);
-        SSTableScanner scanner = reader.getDirectScanner();
+        SSTableReader sstable = SSTableReader.open(desc);
+        RandomAccessReader dfile = sstable.openDataReader();
 
-        IPartitioner<?> partitioner = reader.partitioner;
+        IPartitioner<?> partitioner = sstable.partitioner;
 
         if (excludes != null)
             toExport.removeAll(Arrays.asList(excludes));
@@ -333,27 +303,30 @@ public class SSTableExport
 
             lastKey = decoratedKey;
 
-            scanner.seekTo(decoratedKey);
-
-            if (!scanner.hasNext())
+            RowIndexEntry entry = sstable.getPosition(decoratedKey, SSTableReader.Operator.EQ);
+            if (entry == null)
                 continue;
 
-            SSTableIdentityIterator row = (SSTableIdentityIterator) scanner.next();
-            if (!row.getKey().equals(decoratedKey))
-                continue;
+            dfile.seek(entry.position);
+            ByteBufferUtil.readWithShortLength(dfile); // row key
+            if (sstable.descriptor.version.hasRowSizeAndColumnCount)
+                dfile.readLong(); // row size
+            DeletionInfo deletionInfo = new DeletionInfo(DeletionTime.serializer.deserialize(dfile));
+            int columnCount = sstable.descriptor.version.hasRowSizeAndColumnCount ? dfile.readInt() : Integer.MAX_VALUE;
 
-            serializeRow(row, decoratedKey, outs);
+            Iterator<OnDiskAtom> atomIterator = sstable.metadata.getOnDiskIterator(dfile, columnCount, sstable.descriptor.version);
+
+            serializeRow(deletionInfo, atomIterator, sstable.metadata, decoratedKey, outs);
 
             if (i != 0)
                 outs.println(",");
 
+            checkStream(outs);
             i++;
         }
 
         outs.println("\n]");
         outs.flush();
-
-        scanner.close();
     }
 
     // This is necessary to accommodate the test suite since you cannot open a Reader more
@@ -367,7 +340,7 @@ public class SSTableExport
 
 
         SSTableIdentityIterator row;
-        SSTableScanner scanner = reader.getDirectScanner();
+        SSTableScanner scanner = reader.getScanner();
 
         outs.println("[");
 
@@ -386,6 +359,7 @@ public class SSTableExport
                 outs.println(",");
 
             serializeRow(row, row.getKey(), outs);
+            checkStream(outs);
 
             i++;
         }
@@ -399,10 +373,9 @@ public class SSTableExport
     /**
      * Export an SSTable and write the resulting JSON to a PrintStream.
      *
-     * @param desc the descriptor of the sstable table to read from
-     * @param outs PrintStream to write the output to
+     * @param desc     the descriptor of the sstable to read from
+     * @param outs     PrintStream to write the output to
      * @param excludes keys to exclude from export
-     *
      * @throws IOException on failure to read/write input/output
      */
     public static void export(Descriptor desc, PrintStream outs, String[] excludes) throws IOException
@@ -413,9 +386,8 @@ public class SSTableExport
     /**
      * Export an SSTable and write the resulting JSON to standard out.
      *
-     * @param desc the descriptor of the sstable table to read from
+     * @param desc     the descriptor of the sstable to read from
      * @param excludes keys to exclude from export
-     *
      * @throws IOException on failure to read/write SSTable/standard out
      */
     public static void export(Descriptor desc, String[] excludes) throws IOException
@@ -428,11 +400,10 @@ public class SSTableExport
      * export the contents of the SSTable to JSON.
      *
      * @param args command lines arguments
-     *
-     * @throws IOException on failure to open/read/write files or output streams
+     * @throws IOException            on failure to open/read/write files or output streams
      * @throws ConfigurationException on configuration failure (wrong params given)
      */
-    public static void main(String[] args) throws IOException, ConfigurationException
+    public static void main(String[] args) throws ConfigurationException
     {
         String usage = String.format("Usage: %s <sstable> [-k key [-k key [...]] -x key [-x key [...]]]%n", SSTableExport.class.getName());
 
@@ -463,23 +434,54 @@ public class SSTableExport
 
         DatabaseDescriptor.loadSchemas();
         Descriptor descriptor = Descriptor.fromFilename(ssTableFileName);
-        if (Schema.instance.getCFMetaData(descriptor) == null)
+
+        // Start by validating keyspace name
+        if (Schema.instance.getKSMetaData(descriptor.ksname) == null)
         {
-            System.err.println(String.format("The provided column family is not part of this cassandra database: keysapce = %s, column family = %s",
+            System.err.println(String.format("Filename %s references to nonexistent keyspace: %s!",
+                                             ssTableFileName, descriptor.ksname));
+            System.exit(1);
+        }
+        Keyspace keyspace = Keyspace.open(descriptor.ksname);
+
+        // Make it work for indexes too - find parent cf if necessary
+        String baseName = descriptor.cfname;
+        if (descriptor.cfname.contains("."))
+        {
+            String[] parts = descriptor.cfname.split("\\.", 2);
+            baseName = parts[0];
+        }
+
+        // IllegalArgumentException will be thrown here if ks/cf pair does not exist
+        try
+        {
+            keyspace.getColumnFamilyStore(baseName);
+        }
+        catch (IllegalArgumentException e)
+        {
+            System.err.println(String.format("The provided column family is not part of this cassandra keyspace: keyspace = %s, column family = %s",
                                              descriptor.ksname, descriptor.cfname));
             System.exit(1);
         }
 
-        if (cmd.hasOption(ENUMERATEKEYS_OPTION))
+        try
         {
-            enumeratekeys(descriptor, System.out);
-        }
-        else
-        {
-            if ((keys != null) && (keys.length > 0))
-                export(descriptor, System.out, Arrays.asList(keys), excludes);
+            if (cmd.hasOption(ENUMERATEKEYS_OPTION))
+            {
+                enumeratekeys(descriptor, System.out);
+            }
             else
-                export(descriptor, excludes);
+            {
+                if ((keys != null) && (keys.length > 0))
+                    export(descriptor, System.out, Arrays.asList(keys), excludes);
+                else
+                    export(descriptor, excludes);
+            }
+        }
+        catch (IOException e)
+        {
+            // throwing exception outside main with broken pipe causes windows cmd to hang
+            e.printStackTrace(System.err);
         }
 
         System.exit(0);

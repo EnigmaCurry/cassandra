@@ -29,12 +29,12 @@ public class ReadyMessage extends Message.Response
 {
     public static final Message.Codec<ReadyMessage> codec = new Message.Codec<ReadyMessage>()
     {
-        public ReadyMessage decode(ChannelBuffer body)
+        public ReadyMessage decode(ChannelBuffer body, int version)
         {
             return new ReadyMessage();
         }
 
-        public ChannelBuffer encode(ReadyMessage msg)
+        public ChannelBuffer encode(ReadyMessage msg, int version)
         {
             return ChannelBuffers.EMPTY_BUFFER;
         }
@@ -47,7 +47,7 @@ public class ReadyMessage extends Message.Response
 
     public ChannelBuffer encode()
     {
-        return codec.encode(this);
+        return codec.encode(this, getVersion());
     }
 
     @Override

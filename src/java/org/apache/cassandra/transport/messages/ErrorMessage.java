@@ -43,7 +43,7 @@ public class ErrorMessage extends Message.Response
 
     public static final Message.Codec<ErrorMessage> codec = new Message.Codec<ErrorMessage>()
     {
-        public ErrorMessage decode(ChannelBuffer body)
+        public ErrorMessage decode(ChannelBuffer body, int version)
         {
             ExceptionCode code = ExceptionCode.fromValue(body.readInt());
             String msg = CBUtil.readString(body);
@@ -123,7 +123,7 @@ public class ErrorMessage extends Message.Response
             return new ErrorMessage(te);
         }
 
-        public ChannelBuffer encode(ErrorMessage msg)
+        public ChannelBuffer encode(ErrorMessage msg, int version)
         {
             ChannelBuffer ccb = CBUtil.intToCB(msg.error.code().value);
             ChannelBuffer mcb = CBUtil.stringToCB(msg.error.getMessage());
@@ -188,19 +188,32 @@ public class ErrorMessage extends Message.Response
         this.error = error;
     }
 
+    private ErrorMessage(TransportException error, int streamId)
+    {
+        this(error);
+        setStreamId(streamId);
+    }
+
     public static ErrorMessage fromException(Throwable e)
     {
+        int streamId = 0;
+        if (e instanceof WrappedException)
+        {
+            streamId = ((WrappedException)e).streamId;
+            e = e.getCause();
+        }
+
         if (e instanceof TransportException)
-            return new ErrorMessage((TransportException)e);
+            return new ErrorMessage((TransportException)e, streamId);
 
         // Unexpected exception
         logger.error("Unexpected exception during request", e);
-        return new ErrorMessage(new ServerError(e));
+        return new ErrorMessage(new ServerError(e), streamId);
     }
 
     public ChannelBuffer encode()
     {
-        return codec.encode(this);
+        return codec.encode(this, getVersion());
     }
 
     @Override
@@ -208,4 +221,21 @@ public class ErrorMessage extends Message.Response
     {
         return "ERROR " + error.code() + ": " + error.getMessage();
     }
+
+    public static RuntimeException wrap(Throwable t, int streamId)
+    {
+        return new WrappedException(t, streamId);
+    }
+
+    private static class WrappedException extends RuntimeException
+    {
+        private final int streamId;
+
+        public WrappedException(Throwable cause, int streamId)
+        {
+            super(cause);
+            this.streamId = streamId;
+        }
+    }
+
 }

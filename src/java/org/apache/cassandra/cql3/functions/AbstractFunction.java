@@ -17,12 +17,10 @@
  */
 package org.apache.cassandra.cql3.functions;
 
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.exceptions.InvalidRequestException;
 
 public abstract class AbstractFunction implements Function
 {
@@ -50,6 +48,12 @@ public abstract class AbstractFunction implements Function
     public AbstractType<?> returnType()
     {
         return returnType;
+    }
+
+    // Most of our functions are pure, the other ones should override this
+    public boolean isPure()
+    {
+        return true;
     }
 
     /**

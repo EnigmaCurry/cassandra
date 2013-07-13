@@ -19,8 +19,10 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.cql.jdbc.JdbcBytes;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.BytesSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Hex;
 
@@ -29,16 +31,6 @@ public class BytesType extends AbstractType<ByteBuffer>
     public static final BytesType instance = new BytesType();
 
     BytesType() {} // singleton
-
-    public ByteBuffer compose(ByteBuffer bytes)
-    {
-        return JdbcBytes.instance.compose(bytes);
-    }
-
-    public ByteBuffer decompose(ByteBuffer value)
-    {
-        return JdbcBytes.instance.decompose(value);
-    }
 
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
@@ -53,11 +45,6 @@ public class BytesType extends AbstractType<ByteBuffer>
         return ByteBufferUtil.compareUnsigned(o1, o2);
     }
 
-    public String getString(ByteBuffer bytes)
-    {
-        return JdbcBytes.instance.getString(bytes);
-    }
-
     public ByteBuffer fromString(String source)
     {
         try
@@ -68,11 +55,6 @@ public class BytesType extends AbstractType<ByteBuffer>
         {
             throw new MarshalException(String.format("cannot parse '%s' as hex bytes", source), e);
         }
-    }
-
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        // all bytes are legal.
     }
 
     @Override
@@ -86,5 +68,10 @@ public class BytesType extends AbstractType<ByteBuffer>
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.BLOB;
+    }
+
+    public TypeSerializer<ByteBuffer> getSerializer()
+    {
+        return BytesSerializer.instance;
     }
 }

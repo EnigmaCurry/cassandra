@@ -26,7 +26,6 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.MessageIn;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.WrappedRunnable;
 
 /**
@@ -39,7 +38,7 @@ public class DefinitionsUpdateVerbHandler implements IVerbHandler<Collection<Row
 {
     private static final Logger logger = LoggerFactory.getLogger(DefinitionsUpdateVerbHandler.class);
 
-    public void doVerb(final MessageIn<Collection<RowMutation>> message, String id)
+    public void doVerb(final MessageIn<Collection<RowMutation>> message, int id)
     {
         logger.debug("Received schema mutation push from " + message.from);
 
@@ -47,12 +46,7 @@ public class DefinitionsUpdateVerbHandler implements IVerbHandler<Collection<Row
         {
             public void runMayThrow() throws Exception
             {
-                if (message.version < MessagingService.VERSION_117)
-                {
-                    logger.error("Can't accept schema migrations from Cassandra versions previous to 1.1.7, please upgrade first");
-                    return;
-                }
-                DefsTable.mergeSchema(message.payload);
+                DefsTables.mergeSchema(message.payload);
             }
         });
     }

@@ -22,8 +22,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
 
+import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 
 public class ReversedType<T> extends AbstractType<T>
 {
@@ -81,19 +84,15 @@ public class ReversedType<T> extends AbstractType<T>
         return baseType.fromString(source);
     }
 
-    public void validate(ByteBuffer bytes) throws MarshalException
+    @Override
+    public CQL3Type asCQL3Type()
     {
-        baseType.validate(bytes);
+        return baseType.asCQL3Type();
     }
 
-    public T compose(ByteBuffer bytes)
+    public TypeSerializer<T> getSerializer()
     {
-        return baseType.compose(bytes);
-    }
-
-    public ByteBuffer decompose(T value)
-    {
-        return baseType.decompose(value);
+        return baseType.getSerializer();
     }
 
     @Override

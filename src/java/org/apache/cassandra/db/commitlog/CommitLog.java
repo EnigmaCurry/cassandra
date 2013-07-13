@@ -21,7 +21,6 @@ import java.io.*;
 import java.lang.management.ManagementFactory;
 import java.util.*;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -36,6 +35,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.metrics.CommitLogMetrics;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.utils.FBUtilities;
 
 /*
  * Commit Log tracks every write operation into the system. The aim of the commit log is to be able to
@@ -188,13 +188,6 @@ public class CommitLog implements CommitLogMBean
      */
     public void add(RowMutation rm)
     {
-        long totalSize = RowMutation.serializer.serializedSize(rm, MessagingService.current_version) + CommitLogSegment.ENTRY_OVERHEAD_SIZE;
-        if (totalSize > DatabaseDescriptor.getCommitLogSegmentSize())
-        {
-            logger.warn("Skipping commitlog append of extremely large mutation ({} bytes)", totalSize);
-            return;
-        }
-
         executor.add(new LogRecordAdder(rm));
     }
 
@@ -253,18 +246,7 @@ public class CommitLog implements CommitLogMBean
             }
         };
 
-        try
-        {
-            executor.submit(task).get();
-        }
-        catch (InterruptedException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException(e);
-        }
+        FBUtilities.waitOnFuture(executor.submit(task));
     }
 
     /**
@@ -300,27 +282,6 @@ public class CommitLog implements CommitLogMBean
     public long getTotalCommitlogSize()
     {
         return metrics.totalCommitLogSize.value();
-    }
-
-    /**
-     * Forces a new segment file to be allocated and activated. Used mainly by truncate.
-     */
-    public void forceNewSegment() throws ExecutionException, InterruptedException
-    {
-        logger.debug("Forcing new segment creation");
-
-        Callable<?> task = new Callable()
-        {
-            public Object call()
-            {
-                if (activeSegment.position() > 0)
-                    activateNextSegment();
-
-                return null;
-            }
-        };
-
-        executor.submit(task).get();
     }
 
     /**
@@ -371,7 +332,14 @@ public class CommitLog implements CommitLogMBean
 
         public void run()
         {
-            if (!activeSegment.hasCapacityFor(rowMutation))
+            long totalSize = RowMutation.serializer.serializedSize(rowMutation, MessagingService.current_version) + CommitLogSegment.ENTRY_OVERHEAD_SIZE;
+            if (totalSize > DatabaseDescriptor.getCommitLogSegmentSize())
+            {
+                logger.warn("Skipping commitlog append of extremely large mutation ({} bytes)", totalSize);
+                return;
+            }
+
+            if (!activeSegment.hasCapacityFor(totalSize))
             {
                 CommitLogSegment oldSegment = activeSegment;
                 activateNextSegment();

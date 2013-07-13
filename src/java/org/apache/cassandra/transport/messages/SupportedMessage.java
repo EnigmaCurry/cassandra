@@ -33,12 +33,12 @@ public class SupportedMessage extends Message.Response
 {
     public static final Message.Codec<SupportedMessage> codec = new Message.Codec<SupportedMessage>()
     {
-        public SupportedMessage decode(ChannelBuffer body)
+        public SupportedMessage decode(ChannelBuffer body, int version)
         {
             return new SupportedMessage(CBUtil.readStringToStringListMap(body));
         }
 
-        public ChannelBuffer encode(SupportedMessage msg)
+        public ChannelBuffer encode(SupportedMessage msg, int version)
         {
             ChannelBuffer cb = ChannelBuffers.dynamicBuffer();
             CBUtil.writeStringToStringListMap(cb, msg.supported);
@@ -56,7 +56,7 @@ public class SupportedMessage extends Message.Response
 
     public ChannelBuffer encode()
     {
-        return codec.encode(this);
+        return codec.encode(this, getVersion());
     }
 
     @Override

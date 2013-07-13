@@ -193,6 +193,8 @@ cqlStatement returns [ParsedStatement stmt]
     | st20=alterUserStatement          { $stmt = st20; }
     | st21=dropUserStatement           { $stmt = st21; }
     | st22=listUsersStatement          { $stmt = st22; }
+    | st23=createTriggerStatement      { $stmt = st23; }
+    | st24=dropTriggerStatement      { $stmt = st24; }
     ;
 
 /*
@@ -211,22 +213,24 @@ useStatement returns [UseStatement stmt]
 selectStatement returns [SelectStatement.RawStatement expr]
     @init {
         boolean isCount = false;
-        int limit = Integer.MAX_VALUE;
+        ColumnIdentifier countAlias = null;
+        Term.Raw limit = null;
         Map<ColumnIdentifier, Boolean> orderings = new LinkedHashMap<ColumnIdentifier, Boolean>();
         boolean allowFiltering = false;
     }
-    : K_SELECT ( sclause=selectClause | (K_COUNT '(' sclause=selectCountClause ')' { isCount = true; }) )
+    : K_SELECT ( sclause=selectClause
+               | (K_COUNT '(' sclause=selectCountClause ')' { isCount = true; } (K_AS c=cident { countAlias = c; })?) )
       K_FROM cf=columnFamilyName
       ( K_WHERE wclause=whereClause )?
       ( K_ORDER K_BY orderByClause[orderings] ( ',' orderByClause[orderings] )* )?
-      ( K_LIMIT rows=INTEGER { limit = Integer.parseInt($rows.text); } )?
+      ( K_LIMIT rows=intValue { limit = rows; } )?
       ( K_ALLOW K_FILTERING  { allowFiltering = true; } )?
       {
-          SelectStatement.Parameters params = new SelectStatement.Parameters(limit,
-                                                                             orderings,
+          SelectStatement.Parameters params = new SelectStatement.Parameters(orderings,
                                                                              isCount,
+                                                                             countAlias,
                                                                              allowFiltering);
-          $expr = new SelectStatement.RawStatement(cf, params, sclause, wclause);
+          $expr = new SelectStatement.RawStatement(cf, params, sclause, wclause, limit);
       }
     ;
 
@@ -235,18 +239,23 @@ selectClause returns [List<RawSelector> expr]
     | '\*' { $expr = Collections.<RawSelector>emptyList();}
     ;
 
-selectionFunctionArgs returns [List<RawSelector> a]
-    : '(' ')' { $a = Collections.emptyList(); }
-    | '(' s1=selector { List<RawSelector> args = new ArrayList<RawSelector>(); args.add(s1); }
-          ( ',' sn=selector { args.add(sn); } )*
-       ')' { $a = args; }
+selector returns [RawSelector s]
+    @init{ ColumnIdentifier alias = null; }
+    : us=unaliasedSelector (K_AS c=cident { alias = c; })? { $s = new RawSelector(us, alias); }
     ;
 
-selector returns [RawSelector s]
+unaliasedSelector returns [Selectable s]
     : c=cident                                  { $s = c; }
-    | K_WRITETIME '(' c=cident ')'              { $s = new RawSelector.WritetimeOrTTL(c, true); }
-    | K_TTL       '(' c=cident ')'              { $s = new RawSelector.WritetimeOrTTL(c, false); }
-    | f=functionName args=selectionFunctionArgs { $s = new RawSelector.WithFunction(f, args); }
+    | K_WRITETIME '(' c=cident ')'              { $s = new Selectable.WritetimeOrTTL(c, true); }
+    | K_TTL       '(' c=cident ')'              { $s = new Selectable.WritetimeOrTTL(c, false); }
+    | f=functionName args=selectionFunctionArgs { $s = new Selectable.WithFunction(f, args); }
+    ;
+
+selectionFunctionArgs returns [List<Selectable> a]
+    : '(' ')' { $a = Collections.emptyList(); }
+    | '(' s1=unaliasedSelector { List<Selectable> args = new ArrayList<Selectable>(); args.add(s1); }
+          ( ',' sn=unaliasedSelector { args.add(sn); } )*
+       ')' { $a = args; }
     ;
 
 selectCountClause returns [List<RawSelector> expr]
@@ -273,9 +282,9 @@ orderByClause[Map<ColumnIdentifier, Boolean> orderings]
  * USING TIMESTAMP <long>;
  *
  */
-insertStatement returns [UpdateStatement expr]
+insertStatement returns [UpdateStatement.ParsedInsert expr]
     @init {
-        Attributes attrs = new Attributes();
+        Attributes.Raw attrs = new Attributes.Raw();
         List<ColumnIdentifier> columnNames  = new ArrayList<ColumnIdentifier>();
         List<Term.Raw> values = new ArrayList<Term.Raw>();
     }
@@ -285,25 +294,25 @@ insertStatement returns [UpdateStatement expr]
           '(' v1=term { values.add(v1); } ( ',' vn=term { values.add(vn); } )* ')'
         ( usingClause[attrs] )?
       {
-          $expr = new UpdateStatement(cf, attrs, columnNames, values);
+          $expr = new UpdateStatement.ParsedInsert(cf, attrs, columnNames, values);
       }
     ;
 
-usingClause[Attributes attrs]
+usingClause[Attributes.Raw attrs]
     : K_USING usingClauseObjective[attrs] ( K_AND? usingClauseObjective[attrs] )*
     ;
 
-usingClauseDelete[Attributes attrs]
+usingClauseDelete[Attributes.Raw attrs]
     : K_USING usingClauseDeleteObjective[attrs] ( K_AND? usingClauseDeleteObjective[attrs] )*
     ;
 
-usingClauseDeleteObjective[Attributes attrs]
-    : K_TIMESTAMP ts=INTEGER { attrs.timestamp = Long.valueOf($ts.text); }
+usingClauseDeleteObjective[Attributes.Raw attrs]
+    : K_TIMESTAMP ts=intValue { attrs.timestamp = ts; }
     ;
 
-usingClauseObjective[Attributes attrs]
+usingClauseObjective[Attributes.Raw attrs]
     : usingClauseDeleteObjective[attrs]
-    | K_TTL t=INTEGER { attrs.timeToLive = Integer.valueOf($t.text); }
+    | K_TTL t=intValue { attrs.timeToLive = t; }
     ;
 
 /**
@@ -312,18 +321,30 @@ usingClauseObjective[Attributes attrs]
  * SET name1 = value1, name2 = value2
  * WHERE key = value;
  */
-updateStatement returns [UpdateStatement expr]
+updateStatement returns [UpdateStatement.ParsedUpdate expr]
     @init {
-        Attributes attrs = new Attributes();
+        Attributes.Raw attrs = new Attributes.Raw();
         List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations = new ArrayList<Pair<ColumnIdentifier, Operation.RawUpdate>>();
+        boolean ifNotExists = false;
     }
     : K_UPDATE cf=columnFamilyName
       ( usingClause[attrs] )?
       K_SET columnOperation[operations] (',' columnOperation[operations])*
       K_WHERE wclause=whereClause
+      ( K_IF (K_NOT K_EXISTS { ifNotExists = true; } | conditions=updateCondition) )?
       {
-          return new UpdateStatement(cf, operations, wclause, attrs);
+          return new UpdateStatement.ParsedUpdate(cf,
+                                                  attrs,
+                                                  operations,
+                                                  wclause,
+                                                  conditions == null ? Collections.<Pair<ColumnIdentifier, Operation.RawUpdate>>emptyList() : conditions,
+                                                  ifNotExists);
       }
+    ;
+
+updateCondition returns [List<Pair<ColumnIdentifier, Operation.RawUpdate>> conditions]
+    @init { conditions = new ArrayList<Pair<ColumnIdentifier, Operation.RawUpdate>>(); }
+    : columnOperation[conditions] ( K_AND columnOperation[conditions] )*
     ;
 
 /**
@@ -332,17 +353,22 @@ updateStatement returns [UpdateStatement expr]
  * USING TIMESTAMP <long>
  * WHERE KEY = keyname;
  */
-deleteStatement returns [DeleteStatement expr]
+deleteStatement returns [DeleteStatement.Parsed expr]
     @init {
-        Attributes attrs = new Attributes();
+        Attributes.Raw attrs = new Attributes.Raw();
         List<Operation.RawDeletion> columnDeletions = Collections.emptyList();
     }
     : K_DELETE ( dels=deleteSelection { columnDeletions = dels; } )?
       K_FROM cf=columnFamilyName
       ( usingClauseDelete[attrs] )?
       K_WHERE wclause=whereClause
+      ( K_IF conditions=updateCondition )?
       {
-          return new DeleteStatement(cf, columnDeletions, wclause, attrs);
+          return new DeleteStatement.Parsed(cf,
+                                            attrs,
+                                            columnDeletions,
+                                            wclause,
+                                            conditions == null ? Collections.<Pair<ColumnIdentifier, Operation.RawUpdate>>emptyList() : conditions);
       }
     ;
 
@@ -381,11 +407,11 @@ deleteOp returns [Operation.RawDeletion op]
  *   ...
  * APPLY BATCH
  */
-batchStatement returns [BatchStatement expr]
+batchStatement returns [BatchStatement.Parsed expr]
     @init {
         BatchStatement.Type type = BatchStatement.Type.LOGGED;
-        List<ModificationStatement> statements = new ArrayList<ModificationStatement>();
-        Attributes attrs = new Attributes();
+        List<ModificationStatement.Parsed> statements = new ArrayList<ModificationStatement.Parsed>();
+        Attributes.Raw attrs = new Attributes.Raw();
     }
     : K_BEGIN
       ( K_UNLOGGED { type = BatchStatement.Type.UNLOGGED; } | K_COUNTER { type = BatchStatement.Type.COUNTER; } )?
@@ -393,34 +419,39 @@ batchStatement returns [BatchStatement expr]
           s1=batchStatementObjective ';'? { statements.add(s1); } ( sN=batchStatementObjective ';'? { statements.add(sN); } )*
       K_APPLY K_BATCH
       {
-          return new BatchStatement(type, statements, attrs);
+          return new BatchStatement.Parsed(type, attrs, statements);
       }
     ;
 
-batchStatementObjective returns [ModificationStatement statement]
+batchStatementObjective returns [ModificationStatement.Parsed statement]
     : i=insertStatement  { $statement = i; }
     | u=updateStatement  { $statement = u; }
     | d=deleteStatement  { $statement = d; }
     ;
 
 /**
- * CREATE KEYSPACE <KEYSPACE> WITH attr1 = value1 AND attr2 = value2;
+ * CREATE KEYSPACE [IF NOT EXISTS] <KEYSPACE> WITH attr1 = value1 AND attr2 = value2;
  */
 createKeyspaceStatement returns [CreateKeyspaceStatement expr]
-    @init { KSPropDefs attrs = new KSPropDefs(); }
-    : K_CREATE K_KEYSPACE ks=keyspaceName
-      K_WITH properties[attrs] { $expr = new CreateKeyspaceStatement(ks, attrs); }
+    @init {
+        KSPropDefs attrs = new KSPropDefs();
+        boolean ifNotExists = false;
+    }
+    : K_CREATE K_KEYSPACE (K_IF K_NOT K_EXISTS { ifNotExists = true; } )? ks=keyspaceName
+      K_WITH properties[attrs] { $expr = new CreateKeyspaceStatement(ks, attrs, ifNotExists); }
     ;
 
 /**
- * CREATE COLUMNFAMILY <CF> (
+ * CREATE COLUMNFAMILY [IF NOT EXISTS] <CF> (
  *     <name1> <type>,
  *     <name2> <type>,
  *     <name3> <type>
  * ) WITH <property> = <value> AND ...;
  */
 createColumnFamilyStatement returns [CreateColumnFamilyStatement.RawStatement expr]
-    : K_CREATE K_COLUMNFAMILY cf=columnFamilyName { $expr = new CreateColumnFamilyStatement.RawStatement(cf); }
+    @init { boolean ifNotExists = false; }
+    : K_CREATE K_COLUMNFAMILY (K_IF K_NOT K_EXISTS { ifNotExists = true; } )?
+      cf=columnFamilyName { $expr = new CreateColumnFamilyStatement.RawStatement(cf, ifNotExists); }
       cfamDefinition[expr]
     ;
 
@@ -451,11 +482,34 @@ cfamOrdering[CreateColumnFamilyStatement.RawStatement expr]
     ;
 
 /**
- * CREATE INDEX [indexName] ON columnFamily (columnName);
+ * CREATE INDEX [IF NOT EXISTS] [indexName] ON <columnFamily> (<columnName>);
+ * CREATE CUSTOM INDEX [IF NOT EXISTS] [indexName] ON <columnFamily> (<columnName>) USING <indexClass>;
  */
 createIndexStatement returns [CreateIndexStatement expr]
-    : K_CREATE K_INDEX (idxName=IDENT)? K_ON cf=columnFamilyName '(' id=cident ')'
-      { $expr = new CreateIndexStatement(cf, $idxName.text, id); }
+    @init {
+        boolean isCustom = false;
+        boolean ifNotExists = false;
+    }
+    : K_CREATE (K_CUSTOM { isCustom = true; })? K_INDEX (K_IF K_NOT K_EXISTS { ifNotExists = true; } )?
+        (idxName=IDENT)? K_ON cf=columnFamilyName '(' id=cident ')'
+        ( K_USING cls=STRING_LITERAL )?
+      { $expr = new CreateIndexStatement(cf, $idxName.text, id, ifNotExists, isCustom, $cls.text); }
+    ;
+
+/**
+ * CREATE TRIGGER [triggerName] ON columnFamily (columnName) EXECUTE (class, class);
+ */
+createTriggerStatement returns [CreateTriggerStatement expr]
+    : K_CREATE K_TRIGGER (tn=IDENT) K_ON cf=columnFamilyName K_USING tc1=STRING_LITERAL
+      { $expr = new CreateTriggerStatement(cf, $tn.text, $tc1.text); }
+    ;
+
+/**
+ * DROP TRIGGER [triggerName] ON columnFamily (columnName);
+ */
+dropTriggerStatement returns [DropTriggerStatement expr]
+    : K_DROP K_TRIGGER (tn=IDENT) K_ON cf=columnFamilyName
+      { $expr = new DropTriggerStatement(cf, $tn.text); }
     ;
 
 /**
@@ -484,7 +538,7 @@ alterTableStatement returns [AlterTableStatement expr]
     : K_ALTER K_COLUMNFAMILY cf=columnFamilyName
           ( K_ALTER id=cident K_TYPE v=comparatorType { type = AlterTableStatement.Type.ALTER; }
           | K_ADD   id=cident v=comparatorType        { type = AlterTableStatement.Type.ADD; }
-          // | K_DROP  id=cident                         { type = AlterTableStatement.Type.DROP; }
+          | K_DROP  id=cident                         { type = AlterTableStatement.Type.DROP; }
           | K_WITH  properties[props]                 { type = AlterTableStatement.Type.OPTS; }
           | K_RENAME                                  { type = AlterTableStatement.Type.RENAME; }
                id1=cident K_TO toId1=cident { renames.put(id1, toId1); }
@@ -496,26 +550,28 @@ alterTableStatement returns [AlterTableStatement expr]
     ;
 
 /**
- * DROP KEYSPACE <KSP>;
+ * DROP KEYSPACE [IF EXISTS] <KSP>;
  */
 dropKeyspaceStatement returns [DropKeyspaceStatement ksp]
-    : K_DROP K_KEYSPACE ks=keyspaceName { $ksp = new DropKeyspaceStatement(ks); }
+    @init { boolean ifExists = false; }
+    : K_DROP K_KEYSPACE (K_IF K_EXISTS { ifExists = true; } )? ks=keyspaceName { $ksp = new DropKeyspaceStatement(ks, ifExists); }
     ;
 
 /**
- * DROP COLUMNFAMILY <CF>;
+ * DROP COLUMNFAMILY [IF EXISTS] <CF>;
  */
 dropColumnFamilyStatement returns [DropColumnFamilyStatement stmt]
-    : K_DROP K_COLUMNFAMILY cf=columnFamilyName { $stmt = new DropColumnFamilyStatement(cf); }
+    @init { boolean ifExists = false; }
+    : K_DROP K_COLUMNFAMILY (K_IF K_EXISTS { ifExists = true; } )? cf=columnFamilyName { $stmt = new DropColumnFamilyStatement(cf, ifExists); }
     ;
 
 /**
- * DROP INDEX <INDEX_NAME>
+ * DROP INDEX [IF EXISTS] <INDEX_NAME>
  */
 dropIndexStatement returns [DropIndexStatement expr]
-    :
-      K_DROP K_INDEX index=IDENT
-      { $expr = new DropIndexStatement($index.text); }
+    @init { boolean ifExists = false; }
+    : K_DROP K_INDEX (K_IF K_EXISTS { ifExists = true; } )? index=IDENT
+      { $expr = new DropIndexStatement($index.text, ifExists); }
     ;
 
 /**
@@ -704,7 +760,14 @@ collection_literal returns [Term.Raw value]
 value returns [Term.Raw value]
     : c=constant           { $value = c; }
     | l=collection_literal { $value = l; }
+    | K_NULL               { $value = Constants.NULL_LITERAL; }
     | QMARK                { $value = new AbstractMarker.Raw(++currentBindMarkerIdx); }
+    ;
+
+intValue returns [Term.Raw value]
+    :
+    | t=INTEGER { $value = Constants.Literal.integer($t.text); }
+    | QMARK     { $value = new AbstractMarker.Raw(++currentBindMarkerIdx); }
     ;
 
 functionName returns [String s]
@@ -855,6 +918,7 @@ unreserved_keyword returns [String str]
 
 unreserved_function_keyword returns [String str]
     : k=( K_KEY
+        | K_AS
         | K_CLUSTERING
         | K_COMPACT
         | K_STORAGE
@@ -872,6 +936,9 @@ unreserved_function_keyword returns [String str]
         | K_SUPERUSER
         | K_NOSUPERUSER
         | K_PASSWORD
+        | K_EXISTS
+        | K_CUSTOM
+        | K_TRIGGER
         ) { $str = $k.text; }
     | t=native_type { $str = t.toString(); }
     ;
@@ -880,6 +947,7 @@ unreserved_function_keyword returns [String str]
 // Case-insensitive keywords
 K_SELECT:      S E L E C T;
 K_FROM:        F R O M;
+K_AS:          A S;
 K_WHERE:       W H E R E;
 K_AND:         A N D;
 K_KEY:         K E Y;
@@ -905,6 +973,7 @@ K_KEYSPACES:   K E Y S P A C E S;
 K_COLUMNFAMILY:( C O L U M N F A M I L Y
                  | T A B L E );
 K_INDEX:       I N D E X;
+K_CUSTOM:      C U S T O M;
 K_ON:          O N;
 K_TO:          T O;
 K_DROP:        D R O P;
@@ -925,6 +994,7 @@ K_ASC:         A S C;
 K_DESC:        D E S C;
 K_ALLOW:       A L L O W;
 K_FILTERING:   F I L T E R I N G;
+K_IF:          I F;
 
 K_GRANT:       G R A N T;
 K_ALL:         A L L;
@@ -961,8 +1031,14 @@ K_TIMEUUID:    T I M E U U I D;
 K_TOKEN:       T O K E N;
 K_WRITETIME:   W R I T E T I M E;
 
+K_NULL:        N U L L;
+K_NOT:         N O T;
+K_EXISTS:      E X I S T S;
+
 K_MAP:         M A P;
 K_LIST:        L I S T;
+
+K_TRIGGER:     T R I G G E R;
 
 // Case-insensitive alpha characters
 fragment A: ('a'|'A');
@@ -1049,7 +1125,7 @@ IDENT
     ;
 
 HEXNUMBER
-    : '0' X HEX+
+    : '0' X HEX*
     ;
 
 UUID

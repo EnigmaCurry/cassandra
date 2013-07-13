@@ -28,7 +28,6 @@ import org.apache.cassandra.utils.MergeIterator;
 
 public class CompactionIterable extends AbstractCompactionIterable
 {
-    private long row;
 
     private static final Comparator<OnDiskAtomIterator> comparator = new Comparator<OnDiskAtomIterator>()
     {
@@ -41,7 +40,6 @@ public class CompactionIterable extends AbstractCompactionIterable
     public CompactionIterable(OperationType type, List<ICompactionScanner> scanners, CompactionController controller)
     {
         super(controller, type, scanners);
-        row = 0;
     }
 
     public CloseableIterator<AbstractCompactedRow> iterator()
@@ -78,14 +76,10 @@ public class CompactionIterable extends AbstractCompactionIterable
             finally
             {
                 rows.clear();
-                if ((row++ % 1000) == 0)
-                {
-                    long n = 0;
-                    for (ICompactionScanner scanner : scanners)
-                        n += scanner.getCurrentPosition();
-                    bytesRead = n;
-                    controller.mayThrottle(bytesRead);
-                }
+                long n = 0;
+                for (ICompactionScanner scanner : scanners)
+                    n += scanner.getCurrentPosition();
+                bytesRead = n;
             }
         }
     }

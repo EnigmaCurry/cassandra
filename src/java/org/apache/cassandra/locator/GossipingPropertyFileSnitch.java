@@ -21,17 +21,19 @@ package org.apache.cassandra.locator;
 import java.net.InetAddress;
 import java.util.Map;
 
-import org.apache.cassandra.db.SystemTable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.EndpointState;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.service.StorageService;
 
-public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch
+
+public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch// implements IEndpointStateChangeSubscriber
 {
     private static final Logger logger = LoggerFactory.getLogger(GossipingPropertyFileSnitch.class);
 
@@ -41,6 +43,7 @@ public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch
     private Map<InetAddress, Map<String, String>> savedEndpoints;
     private String DEFAULT_DC = "UNKNOWN_DC";
     private String DEFAULT_RACK = "UNKNOWN_RACK";
+    private final boolean preferLocal;
 
     public GossipingPropertyFileSnitch() throws ConfigurationException
     {
@@ -51,7 +54,7 @@ public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch
 
         myDC = myDC.trim();
         myRack = myRack.trim();
-
+        preferLocal = Boolean.parseBoolean(SnitchProperties.get("prefer_local", "false"));
         try
         {
             psnitch = new PropertyFileSnitch();
@@ -80,7 +83,7 @@ public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch
             if (psnitch == null)
             {
                 if (savedEndpoints == null)
-                    savedEndpoints = SystemTable.loadDcRackInfo();
+                    savedEndpoints = SystemKeyspace.loadDcRackInfo();
                 if (savedEndpoints.containsKey(endpoint))
                     return savedEndpoints.get(endpoint).get("data_center");
                 return DEFAULT_DC;
@@ -108,7 +111,7 @@ public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch
             if (psnitch == null)
             {
                 if (savedEndpoints == null)
-                    savedEndpoints = SystemTable.loadDcRackInfo();
+                    savedEndpoints = SystemKeyspace.loadDcRackInfo();
                 if (savedEndpoints.containsKey(endpoint))
                     return savedEndpoints.get(endpoint).get("rack");
                 return DEFAULT_RACK;
@@ -117,5 +120,13 @@ public class GossipingPropertyFileSnitch extends AbstractNetworkTopologySnitch
                 return psnitch.getRack(endpoint);
         }
         return epState.getApplicationState(ApplicationState.RACK).value;
+    }
+
+    public void gossiperStarting()
+    {
+        super.gossiperStarting();
+        Gossiper.instance.addLocalApplicationState(ApplicationState.INTERNAL_IP,
+                                                   StorageService.instance.valueFactory.internalIP(FBUtilities.getLocalAddress().getHostAddress()));
+        Gossiper.instance.register(new ReconnectableSnitchHelper(this, myDC, preferLocal));
     }
 }

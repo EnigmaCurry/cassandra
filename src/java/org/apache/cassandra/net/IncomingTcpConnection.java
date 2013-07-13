@@ -24,30 +24,31 @@ import java.net.SocketException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xerial.snappy.SnappyInputStream;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.gms.Gossiper;
-import org.apache.cassandra.io.util.FastByteArrayInputStream;
-import org.apache.cassandra.streaming.IncomingStreamReader;
-import org.apache.cassandra.streaming.StreamHeader;
-import org.xerial.snappy.SnappyInputStream;
 
 public class IncomingTcpConnection extends Thread
 {
     private static final Logger logger = LoggerFactory.getLogger(IncomingTcpConnection.class);
 
+    private final int version;
+    private final boolean compressed;
     private final Socket socket;
     public InetAddress from;
 
-    public IncomingTcpConnection(Socket socket)
+    public IncomingTcpConnection(int version, boolean compressed, Socket socket)
     {
         assert socket != null;
+        this.version = version;
+        this.compressed = compressed;
         this.socket = socket;
         if (DatabaseDescriptor.getInternodeRecvBufferSize() != null)
         {
             try
             {
-                this.socket.setReceiveBufferSize(DatabaseDescriptor.getInternodeRecvBufferSize().intValue());
+                this.socket.setReceiveBufferSize(DatabaseDescriptor.getInternodeRecvBufferSize());
             }
             catch (SocketException se)
             {
@@ -66,20 +67,10 @@ public class IncomingTcpConnection extends Thread
     {
         try
         {
-            // determine the connection type to decide whether to buffer
-            DataInputStream in = new DataInputStream(socket.getInputStream());
-            MessagingService.validateMagic(in.readInt());
-            int header = in.readInt();
-            boolean isStream = MessagingService.getBits(header, 3, 1) == 1;
-            int version = MessagingService.getBits(header, 15, 8);
-            logger.debug("Connection version {} from {}", version, socket.getInetAddress());
-
-            if (isStream)
-                handleStream(in, version);
-            else if (version < MessagingService.VERSION_12)
-                handleLegacyVersion(version);
+            if (version < MessagingService.VERSION_12)
+                handleLegacyVersion();
             else
-                handleModernVersion(version, header);
+                handleModernVersion();
         }
         catch (EOFException e)
         {
@@ -96,7 +87,7 @@ public class IncomingTcpConnection extends Thread
         }
     }
 
-    private void handleModernVersion(int version, int header) throws IOException
+    private void handleModernVersion() throws IOException
     {
         DataOutputStream out = new DataOutputStream(socket.getOutputStream());
         out.writeInt(MessagingService.current_version);
@@ -105,7 +96,6 @@ public class IncomingTcpConnection extends Thread
         DataInputStream in = new DataInputStream(socket.getInputStream());
         int maxVersion = in.readInt();
         from = CompactEndpointSerializationHelper.deserialize(in);
-        boolean compressed = MessagingService.getBits(header, 2, 1) == 1;
 
         if (compressed)
         {
@@ -136,69 +126,24 @@ public class IncomingTcpConnection extends Thread
         }
     }
 
-    private void handleLegacyVersion(int version) throws IOException
+    private void handleLegacyVersion()
     {
-        DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 4096));
-
-        from = receiveMessage(in, version); // why? see => CASSANDRA-4099
-        logger.debug("Version for {} is {}", from, version);
-        if (version > MessagingService.current_version)
-        {
-            // save the endpoint so gossip will reconnect to it
-            Gossiper.instance.addSavedEndpoint(from);
-            logger.info("Received messages from newer protocol version. Ignoring");
-            return;
-        }
-        int lastVersion = MessagingService.instance().setVersion(from, version);
-        logger.debug("set version for {} to {}", from, version);
-        if (lastVersion < version)
-        {
-            logger.debug("breaking outbound connections to force version upgrade");
-            MessagingService.instance().getConnectionPool(from).resetToNewerVersion(version);
-        }
-
-        while (true)
-        {
-            MessagingService.validateMagic(in.readInt());
-            int header = in.readInt(); // legacy protocol re-sends header for each message
-            assert !(MessagingService.getBits(header, 3, 1) == 1) : "Non-stream connection cannot change to stream";
-            version = MessagingService.getBits(header, 15, 8);
-            logger.trace("Version is now {}", version);
-            receiveMessage(in, version);
-        }
-    }
-
-    private void handleStream(DataInputStream input, int version) throws IOException
-    {
-        if (version == MessagingService.current_version)
-        {
-            int size = input.readInt();
-            byte[] headerBytes = new byte[size];
-            input.readFully(headerBytes);
-            stream(StreamHeader.serializer.deserialize(new DataInputStream(new FastByteArrayInputStream(headerBytes)), version), input);
-        }
-        else
-        {
-            // streaming connections are per-session and have a fixed version.  we can't do anything with a wrong-version stream connection, so drop it.
-            logger.error("Received stream using protocol version {} (my version {}). Terminating connection",
-                         version, MessagingService.current_version);
-        }
+        throw new UnsupportedOperationException("Unable to read obsolete message version " + version + "; the earliest version supported is 1.2.0");
     }
 
     private InetAddress receiveMessage(DataInputStream input, int version) throws IOException
     {
-        if (version < MessagingService.VERSION_12)
-            input.readInt(); // size of entire message. in 1.0+ this is just a placeholder
+        int id;
+        if (version < MessagingService.VERSION_20)
+            id = Integer.valueOf(input.readUTF());
+        else
+            id = input.readInt();
 
-        String id = input.readUTF();
-        long timestamp = System.currentTimeMillis();;
-        if (version >= MessagingService.VERSION_12)
-        {
-            // make sure to readInt, even if cross_node_to is not enabled
-            int partial = input.readInt();
-            if (DatabaseDescriptor.hasCrossNodeTimeout())
-                timestamp = (timestamp & 0xFFFFFFFF00000000L) | (((partial & 0xFFFFFFFFL) << 2) >> 2);
-        }
+        long timestamp = System.currentTimeMillis();
+        // make sure to readInt, even if cross_node_to is not enabled
+        int partial = input.readInt();
+        if (DatabaseDescriptor.hasCrossNodeTimeout())
+            timestamp = (timestamp & 0xFFFFFFFF00000000L) | (((partial & 0xFFFFFFFFL) << 2) >> 2);
 
         MessageIn message = MessageIn.read(input, version, id);
         if (message == null)
@@ -231,10 +176,5 @@ public class IncomingTcpConnection extends Thread
             if (logger.isDebugEnabled())
                 logger.debug("error closing socket", e);
         }
-    }
-
-    private void stream(StreamHeader streamHeader, DataInputStream input) throws IOException
-    {
-        new IncomingStreamReader(streamHeader, socket).read();
     }
 }

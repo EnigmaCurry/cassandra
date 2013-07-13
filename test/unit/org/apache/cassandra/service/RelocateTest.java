@@ -30,9 +30,10 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.db.SystemTable;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.config.Schema;
@@ -50,6 +51,8 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+
+import com.google.common.util.concurrent.Uninterruptibles;
 
 public class RelocateTest
 {
@@ -111,11 +114,11 @@ public class RelocateTest
     }
 
     // Copy-pasta from MoveTest.java
-    private AbstractReplicationStrategy getStrategy(String table, TokenMetadata tmd) throws ConfigurationException
+    private AbstractReplicationStrategy getStrategy(String keyspaceName, TokenMetadata tmd) throws ConfigurationException
     {
-        KSMetaData ksmd = Schema.instance.getKSMetaData(table);
+        KSMetaData ksmd = Schema.instance.getKSMetaData(keyspaceName);
         return AbstractReplicationStrategy.createReplicationStrategy(
-                table,
+                keyspaceName,
                 ksmd.strategyClass,
                 tmd,
                 new SimpleSnitch(),
@@ -153,14 +156,14 @@ public class RelocateTest
         assertTrue(tmd.isRelocating(relocateToken));
 
         AbstractReplicationStrategy strategy;
-        for (String table : Schema.instance.getNonSystemTables())
+        for (String keyspaceName : Schema.instance.getNonSystemKeyspaces())
         {
-            strategy = getStrategy(table, tmd);
+            strategy = getStrategy(keyspaceName, tmd);
             for (Token token : tokenMap.keySet())
             {
                 BigIntegerToken keyToken = new BigIntegerToken(((BigInteger)token.token).add(new BigInteger("5")));
 
-                HashSet<InetAddress> actual = new HashSet<InetAddress>(tmd.getWriteEndpoints(keyToken, table, strategy.calculateNaturalEndpoints(keyToken, tmd.cloneOnlyTokenMap())));
+                HashSet<InetAddress> actual = new HashSet<InetAddress>(tmd.getWriteEndpoints(keyToken, keyspaceName, strategy.calculateNaturalEndpoints(keyToken, tmd.cloneOnlyTokenMap())));
                 HashSet<InetAddress> expected = new HashSet<InetAddress>();
 
                 for (int i = 0; i < actual.size(); i++)
@@ -187,7 +190,7 @@ public class RelocateTest
 
         // Create a list of the endpoint's existing tokens, and add the relocatee to it.
         List<Token> tokens = new ArrayList<Token>(tmd.getTokens(relocator));
-        SystemTable.updateTokens(tokens);
+        SystemKeyspace.updateTokens(tokens);
         tokens.add(relocatee);
 
         // Send a normal status, then ensure all is copesetic.
@@ -195,14 +198,7 @@ public class RelocateTest
         ss.onChange(relocator, ApplicationState.STATUS, vvFactory.normal(tokens));
 
         // Relocating entries are removed after RING_DELAY
-        try
-        {
-            Thread.sleep(StorageService.RING_DELAY + 10);
-        }
-        catch (InterruptedException e)
-        {
-            System.err.println("ACHTUNG! Interrupted; testRelocationSuccess() will almost certainly fail!");
-        }
+        Uninterruptibles.sleepUninterruptibly(StorageService.RING_DELAY + 10, TimeUnit.MILLISECONDS);
 
         assertTrue(!tmd.isRelocating(relocatee));
         assertEquals(tmd.getEndpoint(relocatee), relocator);

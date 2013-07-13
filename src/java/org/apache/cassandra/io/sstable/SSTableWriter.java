@@ -18,6 +18,7 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.Sets;
@@ -40,13 +41,15 @@ public class SSTableWriter extends SSTable
 {
     private static final Logger logger = LoggerFactory.getLogger(SSTableWriter.class);
 
+    // not very random, but the only value that can't be mistaken for a legal column-name length
+    public static final int END_OF_ROW = 0x0000;
+
     private IndexWriter iwriter;
     private SegmentedFile.Builder dbuilder;
     private final SequentialWriter dataFile;
     private DecoratedKey lastWrittenKey;
     private FileMark dataMark;
     private final SSTableMetadata.Collector sstableMetadataCollector;
-    private DataIntegrityMetadata.ChecksumWriter integratyWriter;
 
     public SSTableWriter(String filename, long keyCount)
     {
@@ -54,7 +57,7 @@ public class SSTableWriter extends SSTable
              keyCount,
              Schema.instance.getCFMetaData(Descriptor.fromFilename(filename)),
              StorageService.getPartitioner(),
-             SSTableMetadata.createCollector());
+             SSTableMetadata.createCollector(Schema.instance.getCFMetaData(Descriptor.fromFilename(filename)).comparator));
     }
 
     private static Set<Component> components(CFMetaData metadata)
@@ -106,10 +109,8 @@ public class SSTableWriter extends SSTable
         else
         {
             dbuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode());
-            dataFile = SequentialWriter.open(new File(getFilename()),
-			                      !metadata.populateIoCacheOnFlush());
-            integratyWriter = DataIntegrityMetadata.checksumWriter(descriptor);
-            dataFile.setDataIntegratyWriter(integratyWriter);
+            dataFile = SequentialWriter.open(new File(getFilename()), !metadata.populateIoCacheOnFlush());
+            dataFile.setDataIntegrityWriter(DataIntegrityMetadata.checksumWriter(descriptor));
         }
 
         this.sstableMetadataCollector = sstableMetadataCollector;
@@ -138,7 +139,7 @@ public class SSTableWriter extends SSTable
         return (lastWrittenKey == null) ? 0 : dataFile.getFilePointer();
     }
 
-    private RowIndexEntry afterAppend(DecoratedKey decoratedKey, long dataPosition, DeletionInfo delInfo, ColumnIndex index)
+    private void afterAppend(DecoratedKey decoratedKey, long dataPosition, RowIndexEntry index)
     {
         lastWrittenKey = decoratedKey;
         last = lastWrittenKey;
@@ -147,29 +148,31 @@ public class SSTableWriter extends SSTable
 
         if (logger.isTraceEnabled())
             logger.trace("wrote " + decoratedKey + " at " + dataPosition);
-        RowIndexEntry entry = RowIndexEntry.create(dataPosition, delInfo, index);
-        iwriter.append(decoratedKey, entry);
+        iwriter.append(decoratedKey, index);
         dbuilder.addPotentialBoundary(dataPosition);
-        return entry;
     }
 
+    /**
+     * @param row
+     * @return null if the row was compacted away entirely; otherwise, the PK index entry for this row
+     */
     public RowIndexEntry append(AbstractCompactedRow row)
     {
         long currentPosition = beforeAppend(row.key);
+        RowIndexEntry entry;
         try
         {
-            ByteBufferUtil.writeWithShortLength(row.key.key, dataFile.stream);
-            long dataStart = dataFile.getFilePointer();
-            long dataSize = row.write(dataFile.stream);
-            assert dataSize == dataFile.getFilePointer() - (dataStart + 8)
-                   : "incorrect row data size " + dataSize + " written to " + dataFile.getPath() + "; correct is " + (dataFile.getFilePointer() - (dataStart + 8));
+            entry = row.write(currentPosition, dataFile.stream);
+            if (entry == null)
+                return null;
         }
         catch (IOException e)
         {
             throw new FSWriteError(e, dataFile.getPath());
         }
         sstableMetadataCollector.update(dataFile.getFilePointer() - currentPosition, row.columnStats());
-        return afterAppend(row.key, currentPosition, row.deletionInfo(), row.index());
+        afterAppend(row.key, currentPosition, entry);
+        return entry;
     }
 
     public void append(DecoratedKey decoratedKey, ColumnFamily cf)
@@ -177,25 +180,8 @@ public class SSTableWriter extends SSTable
         long startPosition = beforeAppend(decoratedKey);
         try
         {
-            ByteBufferUtil.writeWithShortLength(decoratedKey.key, dataFile.stream);
-
-            // Since the columnIndex may insert RangeTombstone marker, computing
-            // the size of the data is tricky.
-            DataOutputBuffer buffer = new DataOutputBuffer();
-
-            // build column index && write columns
-            ColumnIndex.Builder builder = new ColumnIndex.Builder(cf, decoratedKey.key, cf.getColumnCount(), buffer);
-            ColumnIndex index = builder.build(cf);
-
-            TypeSizes typeSizes = TypeSizes.NATIVE;
-            long delSize = DeletionTime.serializer.serializedSize(cf.deletionInfo().getTopLevelDeletion(), typeSizes);
-            dataFile.stream.writeLong(buffer.getLength() + delSize + typeSizes.sizeof(0));
-
-            // Write deletion infos + column count
-            DeletionInfo.serializer().serializeForSSTable(cf.deletionInfo(), dataFile.stream);
-            dataFile.stream.writeInt(builder.writtenAtomCount());
-            dataFile.stream.write(buffer.getData(), 0, buffer.getLength());
-            afterAppend(decoratedKey, startPosition, cf.deletionInfo(), index);
+            RowIndexEntry entry = rawAppend(cf, startPosition, decoratedKey, dataFile.stream);
+            afterAppend(decoratedKey, startPosition, entry);
         }
         catch (IOException e)
         {
@@ -204,81 +190,81 @@ public class SSTableWriter extends SSTable
         sstableMetadataCollector.update(dataFile.getFilePointer() - startPosition, cf.getColumnStats());
     }
 
+    public static RowIndexEntry rawAppend(ColumnFamily cf, long startPosition, DecoratedKey key, DataOutput out) throws IOException
+    {
+        assert cf.getColumnCount() > 0 || cf.isMarkedForDelete();
+
+        ColumnIndex.Builder builder = new ColumnIndex.Builder(cf, key.key, out);
+        ColumnIndex index = builder.build(cf);
+
+        out.writeShort(END_OF_ROW);
+        return RowIndexEntry.create(startPosition, cf.deletionInfo().getTopLevelDeletion(), index);
+    }
+
     /**
      * @throws IOException if a read from the DataInput fails
      * @throws FSWriteError if a write to the dataFile fails
      */
-    public long appendFromStream(DecoratedKey key, CFMetaData metadata, long dataSize, DataInput in) throws IOException
+    public long appendFromStream(DecoratedKey key, CFMetaData metadata, DataInput in) throws IOException
     {
         long currentPosition = beforeAppend(key);
-        long dataStart;
-        try
-        {
-            ByteBufferUtil.writeWithShortLength(key.key, dataFile.stream);
-            dataStart = dataFile.getFilePointer();
-            // write row size
-            dataFile.stream.writeLong(dataSize);
-        }
-        catch (IOException e)
-        {
-            throw new FSWriteError(e, dataFile.getPath());
-        }
-
-        DeletionInfo deletionInfo = DeletionInfo.serializer().deserializeFromSSTable(in, descriptor.version);
-        int columnCount = in.readInt();
-
-        try
-        {
-            DeletionInfo.serializer().serializeForSSTable(deletionInfo, dataFile.stream);
-            dataFile.stream.writeInt(columnCount);
-        }
-        catch (IOException e)
-        {
-            throw new FSWriteError(e, dataFile.getPath());
-        }
 
         // deserialize each column to obtain maxTimestamp and immediately serialize it.
         long minTimestamp = Long.MAX_VALUE;
         long maxTimestamp = Long.MIN_VALUE;
+        int maxLocalDeletionTime = Integer.MIN_VALUE;
+        List<ByteBuffer> minColumnNames = Collections.emptyList();
+        List<ByteBuffer> maxColumnNames = Collections.emptyList();
         StreamingHistogram tombstones = new StreamingHistogram(TOMBSTONE_HISTOGRAM_BIN_SIZE);
-        ColumnFamily cf = ColumnFamily.create(metadata, ArrayBackedSortedColumns.factory());
-        cf.delete(deletionInfo);
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(metadata);
 
-        ColumnIndex.Builder columnIndexer = new ColumnIndex.Builder(cf, key.key, columnCount, dataFile.stream);
+        cf.delete(DeletionTime.serializer.deserialize(in));
+
+        ColumnIndex.Builder columnIndexer = new ColumnIndex.Builder(cf, key.key, dataFile.stream);
         OnDiskAtom.Serializer atomSerializer = Column.onDiskSerializer();
-        for (int i = 0; i < columnCount; i++)
+        try
         {
-            // deserialize column with PRESERVE_SIZE because we've written the dataSize based on the
-            // data size received, so we must reserialize the exact same data
-            OnDiskAtom atom = atomSerializer.deserializeFromSSTable(in, ColumnSerializer.Flag.PRESERVE_SIZE, Integer.MIN_VALUE, Descriptor.Version.CURRENT);
-            if (atom instanceof CounterColumn)
-                atom = ((CounterColumn) atom).markDeltaToBeCleared();
+            while (true)
+            {
+                // deserialize column with PRESERVE_SIZE because we've written the dataSize based on the
+                // data size received, so we must reserialize the exact same data
+                OnDiskAtom atom = atomSerializer.deserializeFromSSTable(in, ColumnSerializer.Flag.PRESERVE_SIZE, Integer.MIN_VALUE, Descriptor.Version.CURRENT);
+                if (atom == null)
+                    break;
+                if (atom instanceof CounterColumn)
+                    atom = ((CounterColumn) atom).markDeltaToBeCleared();
 
-            int deletionTime = atom.getLocalDeletionTime();
-            if (deletionTime < Integer.MAX_VALUE)
-            {
-                tombstones.update(deletionTime);
-            }
-            minTimestamp = Math.min(minTimestamp, atom.minTimestamp());
-            maxTimestamp = Math.max(maxTimestamp, atom.maxTimestamp());
-            try
-            {
+                int deletionTime = atom.getLocalDeletionTime();
+                if (deletionTime < Integer.MAX_VALUE)
+                {
+                    tombstones.update(deletionTime);
+                }
+                minTimestamp = Math.min(minTimestamp, atom.minTimestamp());
+                maxTimestamp = Math.max(maxTimestamp, atom.maxTimestamp());
+                minColumnNames = ColumnNameHelper.minComponents(minColumnNames, atom.name(), metadata.comparator);
+                maxColumnNames = ColumnNameHelper.maxComponents(maxColumnNames, atom.name(), metadata.comparator);
+                maxLocalDeletionTime = Math.max(maxLocalDeletionTime, atom.getLocalDeletionTime());
+
                 columnIndexer.add(atom); // This write the atom on disk too
             }
-            catch (IOException e)
-            {
-                throw new FSWriteError(e, dataFile.getPath());
-            }
+
+            columnIndexer.finish();
+            dataFile.stream.writeShort(END_OF_ROW);
+        }
+        catch (IOException e)
+        {
+            throw new FSWriteError(e, dataFile.getPath());
         }
 
-        assert dataSize == dataFile.getFilePointer() - (dataStart + 8)
-                : "incorrect row data size " + dataSize + " written to " + dataFile.getPath() + "; correct is " + (dataFile.getFilePointer() - (dataStart + 8));
         sstableMetadataCollector.updateMinTimestamp(minTimestamp);
         sstableMetadataCollector.updateMaxTimestamp(maxTimestamp);
+        sstableMetadataCollector.updateMaxLocalDeletionTime(maxLocalDeletionTime);
         sstableMetadataCollector.addRowSize(dataFile.getFilePointer() - currentPosition);
-        sstableMetadataCollector.addColumnCount(columnCount);
+        sstableMetadataCollector.addColumnCount(columnIndexer.writtenAtomCount());
         sstableMetadataCollector.mergeTombstoneHistogram(tombstones);
-        afterAppend(key, currentPosition, deletionInfo, columnIndexer.build());
+        sstableMetadataCollector.updateMinColumnNames(minColumnNames);
+        sstableMetadataCollector.updateMaxColumnNames(maxColumnNames);
+        afterAppend(key, currentPosition, RowIndexEntry.create(currentPosition, cf.deletionInfo().getTopLevelDeletion(), columnIndexer.build()));
         return currentPosition;
     }
 
@@ -316,8 +302,9 @@ public class SSTableWriter extends SSTable
         // main data, close will truncate if necessary
         dataFile.close();
         // write sstable statistics
-        SSTableMetadata sstableMetadata = sstableMetadataCollector.finalizeMetadata(partitioner.getClass().getCanonicalName());
-        writeMetadata(descriptor, sstableMetadata);
+        SSTableMetadata sstableMetadata = sstableMetadataCollector.finalizeMetadata(partitioner.getClass().getCanonicalName(),
+                                                                                    metadata.getBloomFilterFpChance());
+        writeMetadata(descriptor, sstableMetadata, sstableMetadataCollector.ancestors);
 
         // save the table of components
         SSTable.appendTOC(descriptor, components);
@@ -334,7 +321,7 @@ public class SSTableWriter extends SSTable
                                                            partitioner,
                                                            ifile,
                                                            dfile,
-                                                           iwriter.summary,
+                                                           iwriter.summary.build(partitioner),
                                                            iwriter.bf,
                                                            maxDataAge,
                                                            sstableMetadata);
@@ -347,12 +334,12 @@ public class SSTableWriter extends SSTable
         return sstable;
     }
 
-    private static void writeMetadata(Descriptor desc, SSTableMetadata sstableMetadata)
+    private static void writeMetadata(Descriptor desc, SSTableMetadata sstableMetadata,  Set<Integer> ancestors)
     {
         SequentialWriter out = SequentialWriter.open(new File(desc.filenameFor(SSTable.COMPONENT_STATS)), true);
         try
         {
-            SSTableMetadata.serializer.serialize(sstableMetadata, out.stream);
+            SSTableMetadata.serializer.serialize(sstableMetadata, ancestors, out.stream);
         }
         catch (IOException e)
         {
@@ -399,7 +386,7 @@ public class SSTableWriter extends SSTable
     {
         private final SequentialWriter indexFile;
         public final SegmentedFile.Builder builder;
-        public final IndexSummary summary;
+        public final IndexSummaryBuilder summary;
         public final IFilter bf;
         private FileMark mark;
 
@@ -408,7 +395,7 @@ public class SSTableWriter extends SSTable
             indexFile = SequentialWriter.open(new File(descriptor.filenameFor(SSTable.COMPONENT_INDEX)),
                                               !metadata.populateIoCacheOnFlush());
             builder = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode());
-            summary = new IndexSummary(keyCount, metadata.getIndexInterval());
+            summary = new IndexSummaryBuilder(keyCount, metadata.getIndexInterval());
             bf = FilterFactory.getFilter(keyCount, metadata.getBloomFilterFpChance(), true);
         }
 
@@ -446,7 +433,7 @@ public class SSTableWriter extends SSTable
                     // bloom filter
                     FileOutputStream fos = new FileOutputStream(path);
                     DataOutputStream stream = new DataOutputStream(fos);
-                    FilterFactory.serialize(bf, stream, descriptor.version.filterType);
+                    FilterFactory.serialize(bf, stream);
                     stream.flush();
                     fos.getFD().sync();
                     stream.close();
@@ -461,9 +448,6 @@ public class SSTableWriter extends SSTable
             long position = indexFile.getFilePointer();
             indexFile.close(); // calls force
             FileUtils.truncate(indexFile.getPath(), position);
-
-            // finalize in-memory index state
-            summary.complete();
         }
 
         public void mark()

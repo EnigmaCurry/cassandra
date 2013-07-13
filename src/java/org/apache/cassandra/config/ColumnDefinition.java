@@ -20,8 +20,11 @@ package org.apache.cassandra.config;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Objects;
 import com.google.common.collect.Maps;
 
+import org.apache.cassandra.cql3.ColumnNameBuilder;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.*;
@@ -37,11 +40,31 @@ import static org.apache.cassandra.utils.FBUtilities.json;
 
 public class ColumnDefinition
 {
+    /*
+     * The type of CQL3 column this definition represents.
+     * There is 3 main type of CQL3 columns: those parts of the partition key,
+     * those parts of the clustering key and the other, regular ones.
+     * But when COMPACT STORAGE is used, there is by design only one regular
+     * column, whose name is not stored in the data contrarily to the column of
+     * type REGULAR. Hence the COMPACT_VALUE type to distinguish it below.
+     *
+     * Note that thrift/CQL2 only know about definitions of type REGULAR (and
+     * the ones whose componentIndex == null).
+     */
+    public enum Type
+    {
+        PARTITION_KEY,
+        CLUSTERING_KEY,
+        REGULAR,
+        COMPACT_VALUE;
+    }
+
     public final ByteBuffer name;
     private AbstractType<?> validator;
     private IndexType index_type;
     private Map<String,String> index_options;
     private String index_name;
+    public final Type type;
 
     /*
      * If the column comparator is a composite type, indicates to which
@@ -50,7 +73,33 @@ public class ColumnDefinition
      */
     public final Integer componentIndex;
 
-    public ColumnDefinition(ByteBuffer name, AbstractType<?> validator, IndexType index_type, Map<String, String> index_options, String index_name, Integer componentIndex)
+    public static ColumnDefinition partitionKeyDef(ByteBuffer name, AbstractType<?> validator, Integer componentIndex)
+    {
+        return new ColumnDefinition(name, validator, componentIndex, Type.PARTITION_KEY);
+    }
+
+    public static ColumnDefinition clusteringKeyDef(ByteBuffer name, AbstractType<?> validator, Integer componentIndex)
+    {
+        return new ColumnDefinition(name, validator, componentIndex, Type.CLUSTERING_KEY);
+    }
+
+    public static ColumnDefinition regularDef(ByteBuffer name, AbstractType<?> validator, Integer componentIndex)
+    {
+        return new ColumnDefinition(name, validator, componentIndex, Type.REGULAR);
+    }
+
+    public static ColumnDefinition compactValueDef(ByteBuffer name, AbstractType<?> validator)
+    {
+        return new ColumnDefinition(name, validator, null, Type.COMPACT_VALUE);
+    }
+
+    public ColumnDefinition(ByteBuffer name, AbstractType<?> validator, Integer componentIndex, Type type)
+    {
+        this(name, validator, null, null, null, componentIndex, type);
+    }
+
+    @VisibleForTesting
+    public ColumnDefinition(ByteBuffer name, AbstractType<?> validator, IndexType index_type, Map<String, String> index_options, String index_name, Integer componentIndex, Type type)
     {
         assert name != null && validator != null;
         this.name = name;
@@ -58,11 +107,17 @@ public class ColumnDefinition
         this.validator = validator;
         this.componentIndex = componentIndex;
         this.setIndexType(index_type, index_options);
+        this.type = type;
     }
 
     public ColumnDefinition clone()
     {
-        return new ColumnDefinition(name, validator, index_type, index_options, index_name, componentIndex);
+        return new ColumnDefinition(name, validator, index_type, index_options, index_name, componentIndex, type);
+    }
+
+    public ColumnDefinition cloneWithNewName(ByteBuffer newName)
+    {
+        return new ColumnDefinition(newName, validator, index_type, index_options, index_name, componentIndex, type);
     }
 
     @Override
@@ -74,29 +129,23 @@ public class ColumnDefinition
             return false;
 
         ColumnDefinition that = (ColumnDefinition) o;
-        if (index_name != null ? !index_name.equals(that.index_name) : that.index_name != null)
-            return false;
-        if (index_type != that.index_type)
-            return false;
-        if (index_options != null ? !index_options.equals(that.index_options) : that.index_options != null)
-            return false;
-        if (!name.equals(that.name))
-            return false;
-        if (componentIndex != null ? !componentIndex.equals(that.componentIndex) : that.componentIndex != null)
-            return false;
-        return !(validator != null ? !validator.equals(that.validator) : that.validator != null);
+        return Objects.equal(name, that.name)
+            && Objects.equal(validator, that.validator)
+            && Objects.equal(componentIndex, that.componentIndex)
+            && Objects.equal(index_name, that.index_name)
+            && Objects.equal(index_type, that.index_type)
+            && Objects.equal(index_options, that.index_options);
     }
 
     @Override
     public int hashCode()
     {
-        int result = name != null ? name.hashCode() : 0;
-        result = 31 * result + (validator != null ? validator.hashCode() : 0);
-        result = 31 * result + (index_type != null ? index_type.hashCode() : 0);
-        result = 31 * result + (index_options != null ? index_options.hashCode() : 0);
-        result = 31 * result + (index_name != null ? index_name.hashCode() : 0);
-        result = 31 * result + (componentIndex != null ? componentIndex.hashCode() : 0);
-        return result;
+        return Objects.hashCode(name, validator, componentIndex, index_name, index_type, index_options);
+    }
+
+    public boolean isThriftCompatible()
+    {
+        return type == ColumnDefinition.Type.REGULAR && componentIndex == null;
     }
 
     public ColumnDef toThrift()
@@ -123,7 +172,8 @@ public class ColumnDefinition
                                     thriftColumnDef.index_type,
                                     thriftColumnDef.index_options,
                                     thriftColumnDef.index_name,
-                                    isSuper ? 1 : null);
+                                    isSuper ? 1 : null,
+                                    Type.REGULAR);
     }
 
     public static Map<ByteBuffer, ColumnDefinition> fromThrift(List<ColumnDef> thriftDefs, boolean isSuper) throws SyntaxException, ConfigurationException
@@ -147,21 +197,20 @@ public class ColumnDefinition
      */
     public void deleteFromSchema(RowMutation rm, String cfName, AbstractType<?> comparator, long timestamp)
     {
-        ColumnFamily cf = rm.addOrGet(SystemTable.SCHEMA_COLUMNS_CF);
+        ColumnFamily cf = rm.addOrGet(SystemKeyspace.SCHEMA_COLUMNS_CF);
         int ldt = (int) (System.currentTimeMillis() / 1000);
 
-        cf.addColumn(DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "validator"));
-        cf.addColumn(DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "index_type"));
-        cf.addColumn(DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "index_options"));
-        cf.addColumn(DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "index_name"));
-        cf.addColumn(DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "component_index"));
+        ColumnNameBuilder builder = CFMetaData.SchemaColumnsCf.getCfDef().getColumnNameBuilder();
+        builder.add(ByteBufferUtil.bytes(cfName)).add(name);
+        cf.addAtom(new RangeTombstone(builder.build(), builder.buildAsEndOfRange(), timestamp, ldt));
     }
 
     public void toSchema(RowMutation rm, String cfName, AbstractType<?> comparator, long timestamp)
     {
-        ColumnFamily cf = rm.addOrGet(SystemTable.SCHEMA_COLUMNS_CF);
+        ColumnFamily cf = rm.addOrGet(SystemKeyspace.SCHEMA_COLUMNS_CF);
         int ldt = (int) (System.currentTimeMillis() / 1000);
 
+        cf.addColumn(Column.create("", timestamp, cfName, comparator.getString(name), ""));
         cf.addColumn(Column.create(validator.toString(), timestamp, cfName, comparator.getString(name), "validator"));
         cf.addColumn(index_type == null ? DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "index_type")
                                         : Column.create(index_type.toString(), timestamp, cfName, comparator.getString(name), "index_type"));
@@ -171,10 +220,13 @@ public class ColumnDefinition
                                         : Column.create(index_name, timestamp, cfName, comparator.getString(name), "index_name"));
         cf.addColumn(componentIndex == null ? DeletedColumn.create(ldt, timestamp, cfName, comparator.getString(name), "component_index")
                                             : Column.create(componentIndex, timestamp, cfName, comparator.getString(name), "component_index"));
+        cf.addColumn(Column.create(type.toString().toLowerCase(), timestamp, cfName, comparator.getString(name), "type"));
     }
 
     public void apply(ColumnDefinition def, AbstractType<?> comparator)  throws ConfigurationException
     {
+        assert type == def.type && Objects.equal(componentIndex, def.componentIndex);
+
         if (getIndexType() != null && def.getIndexType() != null)
         {
             // If an index is set (and not drop by this update), the validator shouldn't be change to a non-compatible one
@@ -185,10 +237,6 @@ public class ColumnDefinition
             if (!getIndexName().equals(def.getIndexName()))
                 throw new ConfigurationException("Cannot modify index name");
         }
-
-        if ((componentIndex != null && !componentIndex.equals(def.componentIndex))
-         || (componentIndex == null && def.componentIndex != null))
-            throw new ConfigurationException(String.format("Cannot modify component index for column %s", comparator.getString(name)));
 
         setValidator(def.getValidator());
         setIndexType(def.getIndexType(), def.getIndexOptions());
@@ -216,6 +264,10 @@ public class ColumnDefinition
                 String index_name = null;
                 Integer componentIndex = null;
 
+                Type type = result.has("type")
+                          ? Enum.valueOf(Type.class, result.getString("type").toUpperCase())
+                          : Type.REGULAR;
+
                 if (result.has("index_type"))
                     index_type = IndexType.valueOf(result.getString("index_type"));
                 if (result.has("index_options"))
@@ -225,15 +277,17 @@ public class ColumnDefinition
                 if (result.has("component_index"))
                     componentIndex = result.getInt("component_index");
                 // A ColumnDefinition for super columns applies to the column component
-                else if (cfm.isSuper())
+                else if (type == Type.CLUSTERING_KEY && cfm.isSuper())
                     componentIndex = 1;
 
-                cds.add(new ColumnDefinition(cfm.getColumnDefinitionComparator(componentIndex).fromString(result.getString("column_name")),
+
+                cds.add(new ColumnDefinition(cfm.getComponentComparator(componentIndex, type).fromString(result.getString("column_name")),
                                              TypeParser.parse(result.getString("validator")),
                                              index_type,
                                              index_options,
                                              index_name,
-                                             componentIndex));
+                                             componentIndex,
+                                             type));
             }
             catch (RequestValidationException e)
             {
@@ -246,13 +300,14 @@ public class ColumnDefinition
 
     public static Row readSchema(String ksName, String cfName)
     {
-        DecoratedKey key = StorageService.getPartitioner().decorateKey(SystemTable.getSchemaKSKey(ksName));
-        ColumnFamilyStore columnsStore = SystemTable.schemaCFS(SystemTable.SCHEMA_COLUMNS_CF);
+        DecoratedKey key = StorageService.getPartitioner().decorateKey(SystemKeyspace.getSchemaKSKey(ksName));
+        ColumnFamilyStore columnsStore = SystemKeyspace.schemaCFS(SystemKeyspace.SCHEMA_COLUMNS_CF);
         ColumnFamily cf = columnsStore.getColumnFamily(key,
-                                                       DefsTable.searchComposite(cfName, true),
-                                                       DefsTable.searchComposite(cfName, false),
+                                                       DefsTables.searchComposite(cfName, true),
+                                                       DefsTables.searchComposite(cfName, false),
                                                        false,
-                                                       Integer.MAX_VALUE);
+                                                       Integer.MAX_VALUE,
+                                                       System.currentTimeMillis());
         return new Row(key, cf);
     }
 
@@ -265,6 +320,7 @@ public class ColumnDefinition
                ", index_type=" + index_type +
                ", index_name='" + index_name + '\'' +
                (componentIndex != null ? ", component_index=" + componentIndex : "") +
+               ", type=" + type +
                '}';
     }
 
@@ -273,15 +329,27 @@ public class ColumnDefinition
         return index_name;
     }
 
-    public void setIndexName(String s)
+    public ColumnDefinition setIndexName(String s)
     {
-        index_name = s;
+        this.index_name = s;
+        return this;
     }
 
-    public void setIndexType(IndexType index_type, Map<String,String> index_options)
+    public ColumnDefinition setIndexType(IndexType index_type, Map<String,String> index_options)
     {
         this.index_type = index_type;
         this.index_options = index_options;
+        return this;
+    }
+
+    public ColumnDefinition setIndex(String s, IndexType index_type, Map<String,String> index_options)
+    {
+        return setIndexName(s).setIndexType(index_type, index_options);
+    }
+
+    public boolean isIndexed()
+    {
+        return index_type != null;
     }
 
     public IndexType getIndexType()
@@ -302,19 +370,5 @@ public class ColumnDefinition
     public void setValidator(AbstractType<?> validator)
     {
         this.validator = validator;
-    }
-
-    public static Map<String,String> getStringMap(Map<CharSequence, CharSequence> charMap)
-    {
-        if (charMap == null)
-            return null;
-
-        Map<String,String> stringMap = new HashMap<String, String>();
-
-        for (Map.Entry<CharSequence, CharSequence> entry : charMap.entrySet())
-            stringMap.put(entry.getKey().toString(), entry.getValue().toString());
-
-
-        return stringMap;
     }
 }

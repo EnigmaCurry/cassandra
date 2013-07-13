@@ -45,11 +45,6 @@ public abstract class AbstractByteOrderedPartitioner extends AbstractPartitioner
         return new DecoratedKey(getToken(key), key);
     }
 
-    public DecoratedKey convertFromDiskFormat(ByteBuffer key)
-    {
-        return new DecoratedKey(getToken(key), key);
-    }
-
     public BytesToken midpoint(Token ltoken, Token rtoken)
     {
         int ll,rl;
@@ -196,7 +191,7 @@ public abstract class AbstractByteOrderedPartitioner extends AbstractPartitioner
             lastToken = node;
         }
 
-        for (String ks : Schema.instance.getTables())
+        for (String ks : Schema.instance.getKeyspaces())
         {
             for (CFMetaData cfmd : Schema.instance.getKSMetaData(ks).cfMetaData().values())
             {

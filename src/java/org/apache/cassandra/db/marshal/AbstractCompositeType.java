@@ -17,6 +17,10 @@
  */
 package org.apache.cassandra.db.marshal;
 
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.BytesSerializer;
+import org.apache.cassandra.serializers.MarshalException;
+
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -131,10 +135,10 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 
     public static class CompositeComponent
     {
-        public AbstractType comparator;
+        public AbstractType<?> comparator;
         public ByteBuffer   value;
 
-        public CompositeComponent( AbstractType comparator, ByteBuffer value )
+        public CompositeComponent( AbstractType<?> comparator, ByteBuffer value )
         {
             this.comparator = comparator;
             this.value      = value;
@@ -282,6 +286,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         return bb;
     }
 
+    @Override
     public void validate(ByteBuffer bytes) throws MarshalException
     {
         ByteBuffer bb = bytes.duplicate();
@@ -315,14 +320,9 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 
     public abstract ByteBuffer decompose(Object... objects);
 
-    public ByteBuffer compose(ByteBuffer bytes)
+    public TypeSerializer<ByteBuffer> getSerializer()
     {
-        return bytes;
-    }
-
-    public ByteBuffer decompose(ByteBuffer value)
-    {
-        return value;
+        return BytesSerializer.instance;
     }
 
     /**

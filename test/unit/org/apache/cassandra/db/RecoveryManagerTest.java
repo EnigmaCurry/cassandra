@@ -29,7 +29,7 @@ import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.Util.column;
-import static org.apache.cassandra.db.TableTest.assertColumns;
+import static org.apache.cassandra.db.KeyspaceTest.assertColumns;
 
 public class RecoveryManagerTest extends SchemaLoader
 {
@@ -41,39 +41,37 @@ public class RecoveryManagerTest extends SchemaLoader
     @Test
     public void testOne() throws IOException, ExecutionException, InterruptedException
     {
-        Table table1 = Table.open("Keyspace1");
-        Table table2 = Table.open("Keyspace2");
+        Keyspace keyspace1 = Keyspace.open("Keyspace1");
+        Keyspace keyspace2 = Keyspace.open("Keyspace2");
 
         RowMutation rm;
         DecoratedKey dk = Util.dk("keymulti");
         ColumnFamily cf;
 
-        rm = new RowMutation("Keyspace1", dk.key);
-        cf = ColumnFamily.create("Keyspace1", "Standard1");
+        cf = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf.addColumn(column("col1", "val1", 1L));
-        rm.add(cf);
+        rm = new RowMutation("Keyspace1", dk.key, cf);
         rm.apply();
 
-        rm = new RowMutation("Keyspace2", dk.key);
-        cf = ColumnFamily.create("Keyspace2", "Standard3");
+        cf = TreeMapBackedSortedColumns.factory.create("Keyspace2", "Standard3");
         cf.addColumn(column("col2", "val2", 1L));
-        rm.add(cf);
+        rm = new RowMutation("Keyspace2", dk.key, cf);
         rm.apply();
 
-        table1.getColumnFamilyStore("Standard1").clearUnsafe();
-        table2.getColumnFamilyStore("Standard3").clearUnsafe();
+        keyspace1.getColumnFamilyStore("Standard1").clearUnsafe();
+        keyspace2.getColumnFamilyStore("Standard3").clearUnsafe();
 
         CommitLog.instance.resetUnsafe(); // disassociate segments from live CL
         CommitLog.instance.recover();
 
-        assertColumns(Util.getColumnFamily(table1, dk, "Standard1"), "col1");
-        assertColumns(Util.getColumnFamily(table2, dk, "Standard3"), "col2");
+        assertColumns(Util.getColumnFamily(keyspace1, dk, "Standard1"), "col1");
+        assertColumns(Util.getColumnFamily(keyspace2, dk, "Standard3"), "col2");
     }
 
     @Test
     public void testRecoverCounter() throws IOException, ExecutionException, InterruptedException
     {
-        Table table1 = Table.open("Keyspace1");
+        Keyspace keyspace1 = Keyspace.open("Keyspace1");
 
         RowMutation rm;
         DecoratedKey dk = Util.dk("key");
@@ -81,19 +79,18 @@ public class RecoveryManagerTest extends SchemaLoader
 
         for (int i = 0; i < 10; ++i)
         {
-            rm = new RowMutation("Keyspace1", dk.key);
-            cf = ColumnFamily.create("Keyspace1", "Counter1");
+            cf = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Counter1");
             cf.addColumn(new CounterColumn(ByteBufferUtil.bytes("col"), 1L, 1L));
-            rm.add(cf);
+            rm = new RowMutation("Keyspace1", dk.key, cf);
             rm.apply();
         }
 
-        table1.getColumnFamilyStore("Counter1").clearUnsafe();
+        keyspace1.getColumnFamilyStore("Counter1").clearUnsafe();
 
         CommitLog.instance.resetUnsafe(); // disassociate segments from live CL
         CommitLog.instance.recover();
 
-        cf = Util.getColumnFamily(table1, dk, "Counter1");
+        cf = Util.getColumnFamily(keyspace1, dk, "Counter1");
 
         assert cf.getColumnCount() == 1;
         Column c = cf.getColumn(ByteBufferUtil.bytes("col"));

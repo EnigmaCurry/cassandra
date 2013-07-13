@@ -30,7 +30,7 @@ public class RegisterMessage extends Message.Request
 {
     public static final Message.Codec<RegisterMessage> codec = new Message.Codec<RegisterMessage>()
     {
-        public RegisterMessage decode(ChannelBuffer body)
+        public RegisterMessage decode(ChannelBuffer body, int version)
         {
             int length = body.readUnsignedShort();
             List<Event.Type> eventTypes = new ArrayList<Event.Type>(length);
@@ -39,7 +39,7 @@ public class RegisterMessage extends Message.Request
             return new RegisterMessage(eventTypes);
         }
 
-        public ChannelBuffer encode(RegisterMessage msg)
+        public ChannelBuffer encode(RegisterMessage msg, int version)
         {
             ChannelBuffer cb = ChannelBuffers.dynamicBuffer();
             cb.writeShort(msg.eventTypes.size());
@@ -69,7 +69,7 @@ public class RegisterMessage extends Message.Request
 
     public ChannelBuffer encode()
     {
-        return codec.encode(this);
+        return codec.encode(this, getVersion());
     }
 
     @Override

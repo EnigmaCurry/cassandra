@@ -19,15 +19,22 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.db.filter.ColumnSlice;
+import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.OnDiskAtom;
 import org.apache.cassandra.db.RangeTombstone;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
 import static org.apache.cassandra.io.sstable.IndexHelper.IndexInfo;
 
 /**
@@ -130,12 +137,25 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
         };
     }
 
-    public abstract T compose(ByteBuffer bytes);
+    public T compose(ByteBuffer bytes)
+    {
+        return getSerializer().deserialize(bytes);
+    }
 
-    public abstract ByteBuffer decompose(T value);
+    public ByteBuffer decompose(T value)
+    {
+        return getSerializer().serialize(value);
+    }
 
     /** get a string representation of the bytes suitable for log messages */
-    public abstract String getString(ByteBuffer bytes);
+    public String getString(ByteBuffer bytes)
+    {
+        TypeSerializer<T> serializer = getSerializer();
+        serializer.validate(bytes);
+
+        T value = serializer.deserialize(bytes);
+        return value == null ? "null" : serializer.toString(value);
+    }
 
     /** get a byte representation of the given string. */
     public abstract ByteBuffer fromString(String source) throws MarshalException;
@@ -147,13 +167,18 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
     }
 
     /* validate that the byte array is a valid sequence for the type we are supposed to be comparing */
-    public abstract void validate(ByteBuffer bytes) throws MarshalException;
+    public void validate(ByteBuffer bytes) throws MarshalException
+    {
+        getSerializer().validate(bytes);
+    }
 
     /* Most of our internal type should override that. */
     public CQL3Type asCQL3Type()
     {
         return new CQL3Type.Custom(this);
     }
+
+    public abstract TypeSerializer<T> getSerializer();
 
     /** @deprecated use reverseComparator field instead */
     public Comparator<ByteBuffer> getReverseComparator()
@@ -173,7 +198,7 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
     }
 
     /* convenience method */
-    public String getColumnsString(Collection<Column> columns)
+    public String getColumnsString(Iterable<Column> columns)
     {
         StringBuilder builder = new StringBuilder();
         for (Column column : columns)
@@ -246,6 +271,24 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
     }
 
     /**
+     * The number of subcomponents this type has.
+     * This is always 1, i.e. the type has only itself as "subcomponents", except for CompositeType.
+     */
+    public int componentsCount()
+    {
+        return 1;
+    }
+
+    /**
+     * Return a list of the "subcomponents" this type has.
+     * This always return a singleton list with the type itself except for CompositeType.
+     */
+    public List<AbstractType<?>> getComponents()
+    {
+        return Collections.<AbstractType<?>>singletonList(this);
+    }
+
+    /**
      * This must be overriden by subclasses if necessary so that for any
      * AbstractType, this == TypeParser.parse(toString()).
      *
@@ -256,5 +299,26 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
     public String toString()
     {
         return getClass().getName();
+    }
+
+    protected boolean intersects(ByteBuffer minColName, ByteBuffer maxColName, ByteBuffer sliceStart, ByteBuffer sliceEnd)
+    {
+        return (sliceStart.equals(ByteBufferUtil.EMPTY_BYTE_BUFFER) || compare(maxColName, sliceStart) >= 0)
+               && (sliceEnd.equals(ByteBufferUtil.EMPTY_BYTE_BUFFER) || compare(sliceEnd, minColName) >= 0);
+    }
+
+    public boolean intersects(List<ByteBuffer> minColumnNames, List<ByteBuffer> maxColumnNames, SliceQueryFilter filter)
+    {
+        assert minColumnNames.size() == 1;
+
+        for (ColumnSlice slice : filter.slices)
+        {
+            ByteBuffer start = filter.isReversed() ? slice.finish : slice.start;
+            ByteBuffer finish = filter.isReversed() ? slice.start : slice.finish;
+
+            if (intersects(minColumnNames.get(0), maxColumnNames.get(0), start, finish))
+                return true;
+        }
+        return false;
     }
 }

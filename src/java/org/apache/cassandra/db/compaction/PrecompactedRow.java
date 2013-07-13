@@ -20,16 +20,22 @@ package org.apache.cassandra.db.compaction;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 
-import com.google.common.base.Functions;
-
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
+import org.apache.cassandra.db.filter.IDiskAtomFilter;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.io.sstable.ColumnStats;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
+import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.utils.HeapAllocator;
+import org.apache.cassandra.utils.CloseableIterator;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.MergeIterator;
 
 /**
  * PrecompactedRow merges its rows in its constructor in memory.
@@ -37,7 +43,6 @@ import org.apache.cassandra.utils.HeapAllocator;
 public class PrecompactedRow extends AbstractCompactedRow
 {
     private final ColumnFamily compactedCf;
-    private ColumnIndex columnIndex;
 
     /** it is caller's responsibility to call removeDeleted + removeOldShards from the cf before calling this constructor */
     public PrecompactedRow(DecoratedKey key, ColumnFamily cf)
@@ -82,7 +87,7 @@ public class PrecompactedRow extends AbstractCompactedRow
         // See comment in preceding method
         ColumnFamily compacted = ColumnFamilyStore.removeDeleted(cf,
                                                                  shouldPurge ? controller.gcBefore : Integer.MIN_VALUE,
-                                                                 controller.cfs.indexManager.updaterFor(key, false));
+                                                                 controller.cfs.indexManager.updaterFor(key));
         if (shouldPurge && compacted != null && compacted.metadata().getDefaultValidator().isCommutative())
             CounterColumn.mergeAndRemoveOldShards(key, compacted, controller.gcBefore, controller.mergeShardBefore);
         return compacted;
@@ -97,51 +102,62 @@ public class PrecompactedRow extends AbstractCompactedRow
     private static ColumnFamily merge(List<SSTableIdentityIterator> rows, CompactionController controller)
     {
         assert !rows.isEmpty();
-        ColumnFamily cf = null;
-        SecondaryIndexManager.Updater indexer = null;
+
+        final ColumnFamily returnCF = ArrayBackedSortedColumns.factory.create(controller.cfs.metadata);
+
+        // transform into iterators that MergeIterator will like, and apply row-level tombstones
+        List<CloseableIterator<Column>> data = new ArrayList<CloseableIterator<Column>>(rows.size());
         for (SSTableIdentityIterator row : rows)
         {
-            ColumnFamily thisCF;
-            try
-            {
-                // use a map for the first once since that will be the one we merge into
-                ISortedColumns.Factory factory = cf == null ? TreeMapBackedSortedColumns.factory() : ArrayBackedSortedColumns.factory();
-                thisCF = row.getColumnFamilyWithColumns(factory);
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("Failed merge of rows on row with key: " + row.getKey(), e);
-            }
-
-            if (cf == null)
-            {
-                cf = thisCF;
-                indexer = controller.cfs.indexManager.updaterFor(row.getKey(), false); // only init indexer once
-            }
-            else
-            {
-                // addAll is ok even if cf is an ArrayBackedSortedColumns
-                cf.addAllWithSizeDelta(thisCF, HeapAllocator.instance, Functions.<Column>identity(), indexer);
-            }
+            ColumnFamily cf = row.getColumnFamilyWithColumns(ArrayBackedSortedColumns.factory);
+            returnCF.delete(cf);
+            data.add(FBUtilities.closeableIterator(cf.iterator()));
         }
-        return cf;
+
+        merge(returnCF, data, controller.cfs.indexManager.updaterFor(rows.get(0).getKey()));
+
+        return returnCF;
     }
 
-    public long write(DataOutput out) throws IOException
+    // returnCF should already have row-level tombstones applied
+    public static void merge(final ColumnFamily returnCF, List<CloseableIterator<Column>> data, final SecondaryIndexManager.Updater indexer)
     {
-        assert compactedCf != null;
-        DataOutputBuffer buffer = new DataOutputBuffer();
-        ColumnIndex.Builder builder = new ColumnIndex.Builder(compactedCf, key.key, compactedCf.getColumnCount(), buffer);
-        columnIndex = builder.build(compactedCf);
+        IDiskAtomFilter filter = new IdentityQueryFilter();
+        Comparator<Column> fcomp = filter.getColumnComparator(returnCF.getComparator());
 
-        TypeSizes typeSizes = TypeSizes.NATIVE;
-        long delSize = DeletionTime.serializer.serializedSize(compactedCf.deletionInfo().getTopLevelDeletion(), typeSizes);
-        long dataSize = buffer.getLength() + delSize + typeSizes.sizeof(0);
-        out.writeLong(dataSize);
-        DeletionInfo.serializer().serializeForSSTable(compactedCf.deletionInfo(), out);
-        out.writeInt(builder.writtenAtomCount());
-        out.write(buffer.getData(), 0, buffer.getLength());
-        return dataSize;
+        MergeIterator.Reducer<Column, Column> reducer = new MergeIterator.Reducer<Column, Column>()
+        {
+            ColumnFamily container = returnCF.cloneMeShallow();
+
+            public void reduce(Column column)
+            {
+                container.addColumn(column);
+                if (indexer != SecondaryIndexManager.nullUpdater
+                    && !column.isMarkedForDelete(System.currentTimeMillis())
+                    && !container.getColumn(column.name()).equals(column))
+                {
+                    indexer.remove(column);
+                }
+            }
+
+            protected Column getReduced()
+            {
+                Column c = container.iterator().next();
+                container.clear();
+                return c;
+            }
+        };
+
+        Iterator<Column> reduced = MergeIterator.get(data, fcomp, reducer);
+        filter.collectReducedColumns(returnCF, reduced, CompactionManager.NO_GC, System.currentTimeMillis());
+    }
+
+    public RowIndexEntry write(long currentPosition, DataOutput out) throws IOException
+    {
+        if (compactedCf == null)
+            return null;
+
+        return SSTableWriter.rawAppend(compactedCf, currentPosition, key, out);
     }
 
     public void update(MessageDigest digest)
@@ -150,8 +166,7 @@ public class PrecompactedRow extends AbstractCompactedRow
         DataOutputBuffer buffer = new DataOutputBuffer();
         try
         {
-            DeletionInfo.serializer().serializeForSSTable(compactedCf.deletionInfo(), buffer);
-            buffer.writeInt(compactedCf.getColumnCount());
+            DeletionTime.serializer.serialize(compactedCf.deletionInfo().getTopLevelDeletion(), buffer);
             digest.update(buffer.getData(), 0, buffer.getLength());
         }
         catch (IOException e)
@@ -159,11 +174,6 @@ public class PrecompactedRow extends AbstractCompactedRow
             throw new RuntimeException(e);
         }
         compactedCf.updateDigest(digest);
-    }
-
-    public boolean isEmpty()
-    {
-        return compactedCf == null;
     }
 
     public ColumnStats columnStats()
@@ -180,19 +190,6 @@ public class PrecompactedRow extends AbstractCompactedRow
     public ColumnFamily getFullColumnFamily()
     {
         return compactedCf;
-    }
-
-    public DeletionInfo deletionInfo()
-    {
-        return compactedCf.deletionInfo();
-    }
-
-    /**
-     * @return the column index for this row.
-     */
-    public ColumnIndex index()
-    {
-        return columnIndex;
     }
 
     public void close() { }

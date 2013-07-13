@@ -23,9 +23,11 @@ import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 
 import org.apache.cassandra.cql3.ColumnSpecification;
+import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ResultSet;
+import org.apache.cassandra.cql3.statements.SelectStatement;
+import org.apache.cassandra.cql3.statements.ParsedStatement;
 import org.apache.cassandra.transport.*;
-import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.thrift.CqlPreparedResult;
 import org.apache.cassandra.thrift.CqlResult;
 import org.apache.cassandra.thrift.CqlResultType;
@@ -35,13 +37,13 @@ public abstract class ResultMessage extends Message.Response
 {
     public static final Message.Codec<ResultMessage> codec = new Message.Codec<ResultMessage>()
     {
-        public ResultMessage decode(ChannelBuffer body)
+        public ResultMessage decode(ChannelBuffer body, int version)
         {
             Kind kind = Kind.fromId(body.readInt());
-            return kind.subcodec.decode(body);
+            return kind.subcodec.decode(body, version);
         }
 
-        public ChannelBuffer encode(ResultMessage msg)
+        public ChannelBuffer encode(ResultMessage msg, int version)
         {
             ChannelBuffer kcb = ChannelBuffers.buffer(4);
             kcb.writeInt(msg.kind.id);
@@ -102,7 +104,7 @@ public abstract class ResultMessage extends Message.Response
 
     public ChannelBuffer encode()
     {
-        return codec.encode(this);
+        return codec.encode(this, getVersion());
     }
 
     protected abstract ChannelBuffer encodeBody();
@@ -120,12 +122,12 @@ public abstract class ResultMessage extends Message.Response
 
         public static final Message.Codec<ResultMessage> subcodec = new Message.Codec<ResultMessage>()
         {
-            public ResultMessage decode(ChannelBuffer body)
+            public ResultMessage decode(ChannelBuffer body, int version)
             {
                 return new Void();
             }
 
-            public ChannelBuffer encode(ResultMessage msg)
+            public ChannelBuffer encode(ResultMessage msg, int version)
             {
                 assert msg instanceof Void;
                 return ChannelBuffers.EMPTY_BUFFER;
@@ -134,7 +136,7 @@ public abstract class ResultMessage extends Message.Response
 
         protected ChannelBuffer encodeBody()
         {
-            return subcodec.encode(this);
+            return subcodec.encode(this, getVersion());
         }
 
         public CqlResult toThriftResult()
@@ -161,13 +163,13 @@ public abstract class ResultMessage extends Message.Response
 
         public static final Message.Codec<ResultMessage> subcodec = new Message.Codec<ResultMessage>()
         {
-            public ResultMessage decode(ChannelBuffer body)
+            public ResultMessage decode(ChannelBuffer body, int version)
             {
                 String keyspace = CBUtil.readString(body);
                 return new SetKeyspace(keyspace);
             }
 
-            public ChannelBuffer encode(ResultMessage msg)
+            public ChannelBuffer encode(ResultMessage msg, int version)
             {
                 assert msg instanceof SetKeyspace;
                 return CBUtil.stringToCB(((SetKeyspace)msg).keyspace);
@@ -176,7 +178,7 @@ public abstract class ResultMessage extends Message.Response
 
         protected ChannelBuffer encodeBody()
         {
-            return subcodec.encode(this);
+            return subcodec.encode(this, getVersion());
         }
 
         public CqlResult toThriftResult()
@@ -195,16 +197,16 @@ public abstract class ResultMessage extends Message.Response
     {
         public static final Message.Codec<ResultMessage> subcodec = new Message.Codec<ResultMessage>()
         {
-            public ResultMessage decode(ChannelBuffer body)
+            public ResultMessage decode(ChannelBuffer body, int version)
             {
-                return new Rows(ResultSet.codec.decode(body));
+                return new Rows(ResultSet.codec.decode(body, version));
             }
 
-            public ChannelBuffer encode(ResultMessage msg)
+            public ChannelBuffer encode(ResultMessage msg, int version)
             {
                 assert msg instanceof Rows;
                 Rows rowMsg = (Rows)msg;
-                return ResultSet.codec.encode(rowMsg.result);
+                return ResultSet.codec.encode(rowMsg.result, version);
             }
         };
 
@@ -218,7 +220,7 @@ public abstract class ResultMessage extends Message.Response
 
         protected ChannelBuffer encodeBody()
         {
-            return subcodec.encode(this);
+            return subcodec.encode(this, getVersion());
         }
 
         public CqlResult toThriftResult()
@@ -238,48 +240,68 @@ public abstract class ResultMessage extends Message.Response
     {
         public static final Message.Codec<ResultMessage> subcodec = new Message.Codec<ResultMessage>()
         {
-            public ResultMessage decode(ChannelBuffer body)
+            public ResultMessage decode(ChannelBuffer body, int version)
             {
                 MD5Digest id = MD5Digest.wrap(CBUtil.readBytes(body));
-                return new Prepared(id, -1, ResultSet.Metadata.codec.decode(body));
+                ResultSet.Metadata metadata = ResultSet.Metadata.codec.decode(body, version);
+
+                ResultSet.Metadata resultMetadata = ResultSet.Metadata.EMPTY;
+                if (version > 1)
+                    resultMetadata = ResultSet.Metadata.codec.decode(body, version);
+
+                return new Prepared(id, -1, metadata, resultMetadata);
             }
 
-            public ChannelBuffer encode(ResultMessage msg)
+            public ChannelBuffer encode(ResultMessage msg, int version)
             {
                 assert msg instanceof Prepared;
                 Prepared prepared = (Prepared)msg;
                 assert prepared.statementId != null;
-                return ChannelBuffers.wrappedBuffer(CBUtil.bytesToCB(prepared.statementId.bytes), ResultSet.Metadata.codec.encode(prepared.metadata));
+
+
+                return ChannelBuffers.wrappedBuffer(CBUtil.bytesToCB(prepared.statementId.bytes),
+                                                    ResultSet.Metadata.codec.encode(prepared.metadata, version),
+                                                    version > 1 ? ResultSet.Metadata.codec.encode(prepared.resultMetadata, version) : ChannelBuffers.EMPTY_BUFFER);
             }
         };
 
         public final MD5Digest statementId;
         public final ResultSet.Metadata metadata;
+        public final ResultSet.Metadata resultMetadata;
 
         // statement id for CQL-over-thrift compatibility. The binary protocol ignore that.
         private final int thriftStatementId;
 
-        public Prepared(MD5Digest statementId, List<ColumnSpecification> names)
+        public Prepared(MD5Digest statementId, ParsedStatement.Prepared prepared)
         {
-            this(statementId, -1, new ResultSet.Metadata(names));
+            this(statementId, -1, new ResultSet.Metadata(prepared.boundNames), extractResultMetadata(prepared.statement));
         }
 
         public static Prepared forThrift(int statementId, List<ColumnSpecification> names)
         {
-            return new Prepared(null, statementId, new ResultSet.Metadata(names));
+            return new Prepared(null, statementId, new ResultSet.Metadata(names), ResultSet.Metadata.EMPTY);
         }
 
-        private Prepared(MD5Digest statementId, int thriftStatementId, ResultSet.Metadata metadata)
+        private Prepared(MD5Digest statementId, int thriftStatementId, ResultSet.Metadata metadata, ResultSet.Metadata resultMetadata)
         {
             super(Kind.PREPARED);
             this.statementId = statementId;
             this.thriftStatementId = thriftStatementId;
             this.metadata = metadata;
+            this.resultMetadata = resultMetadata;
+        }
+
+        private static ResultSet.Metadata extractResultMetadata(CQLStatement statement)
+        {
+            if (!(statement instanceof SelectStatement))
+                return ResultSet.Metadata.EMPTY;
+
+            return ((SelectStatement)statement).getResultMetadata();
         }
 
         protected ChannelBuffer encodeBody()
         {
-            return subcodec.encode(this);
+            return subcodec.encode(this, getVersion());
         }
 
         public CqlResult toThriftResult()
@@ -294,7 +316,7 @@ public abstract class ResultMessage extends Message.Response
             for (ColumnSpecification name : metadata.names)
             {
                 namesString.add(name.toString());
-                typesString.add(TypeParser.getShortName(name.type));
+                typesString.add(name.type.toString());
             }
             return new CqlPreparedResult(thriftStatementId, metadata.names.size()).setVariable_types(typesString).setVariable_names(namesString);
         }
@@ -329,7 +351,7 @@ public abstract class ResultMessage extends Message.Response
 
         public static final Message.Codec<ResultMessage> subcodec = new Message.Codec<ResultMessage>()
         {
-            public ResultMessage decode(ChannelBuffer body)
+            public ResultMessage decode(ChannelBuffer body, int version)
             {
                 String cStr = CBUtil.readString(body);
                 Change change = null;
@@ -348,7 +370,7 @@ public abstract class ResultMessage extends Message.Response
 
             }
 
-            public ChannelBuffer encode(ResultMessage msg)
+            public ChannelBuffer encode(ResultMessage msg, int version)
             {
                 assert msg instanceof SchemaChange;
                 SchemaChange scm = (SchemaChange)msg;
@@ -362,7 +384,7 @@ public abstract class ResultMessage extends Message.Response
 
         protected ChannelBuffer encodeBody()
         {
-            return subcodec.encode(this);
+            return subcodec.encode(this, getVersion());
         }
 
         public CqlResult toThriftResult()

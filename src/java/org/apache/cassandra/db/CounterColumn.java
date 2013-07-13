@@ -25,6 +25,7 @@ import java.util.Set;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import org.apache.cassandra.serializers.MarshalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,7 +34,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.db.context.IContext.ContextRelationship;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.exceptions.OverloadedException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -169,9 +169,11 @@ public class CounterColumn extends Column
     {
         assert (column instanceof CounterColumn) || (column instanceof DeletedColumn) : "Wrong class type: " + column.getClass();
 
-        if (column.isMarkedForDelete()) // live + tombstone: track last tombstone
+        // live + tombstone: track last tombstone
+        if (column.isMarkedForDelete(Long.MIN_VALUE)) // cannot be an expired column, so the current time is irrelevant
         {
-            if (timestamp() < column.timestamp()) // live < tombstone
+            // live < tombstone
+            if (timestamp() < column.timestamp())
             {
                 return column;
             }
@@ -230,7 +232,7 @@ public class CounterColumn extends Column
         StringBuilder sb = new StringBuilder();
         sb.append(comparator.getString(name));
         sb.append(":");
-        sb.append(isMarkedForDelete());
+        sb.append(false);
         sb.append(":");
         sb.append(contextManager.toString(value));
         sb.append("@");
@@ -344,10 +346,9 @@ public class CounterColumn extends Column
         return new CounterColumn(name, contextManager.markDeltaToBeCleared(value), timestamp, timestampOfLastDelete);
     }
 
-    private static void sendToOtherReplica(DecoratedKey key, ColumnFamily cf) throws RequestExecutionException, IOException
+    private static void sendToOtherReplica(DecoratedKey key, ColumnFamily cf) throws RequestExecutionException
     {
-        RowMutation rm = new RowMutation(cf.metadata().ksName, key.key);
-        rm.add(cf);
+        RowMutation rm = new RowMutation(cf.metadata().ksName, key.key, cf);
 
         final InetAddress local = FBUtilities.getBroadcastAddress();
         String localDataCenter = DatabaseDescriptor.getEndpointSnitch().getDatacenter(local);
@@ -355,7 +356,7 @@ public class CounterColumn extends Column
         StorageProxy.performWrite(rm, ConsistencyLevel.ANY, localDataCenter, new StorageProxy.WritePerformer()
         {
             public void apply(IMutation mutation, Iterable<InetAddress> targets, AbstractWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level)
-            throws IOException, OverloadedException
+            throws OverloadedException
             {
                 // We should only send to the remote replica, not the local one
                 Set<InetAddress> remotes = Sets.difference(ImmutableSet.copyOf(targets), ImmutableSet.of(local));

@@ -128,7 +128,12 @@ public class UntypedResultSet implements Iterable<UntypedResultSet.Row>
 
         public Date getTimestamp(String column)
         {
-            return DateType.instance.compose(data.get(column));
+            return TimestampType.instance.compose(data.get(column));
+        }
+
+        public long getLong(String column)
+        {
+            return LongType.instance.compose(data.get(column));
         }
 
         public <T> Set<T> getSet(String column, AbstractType<T> type)

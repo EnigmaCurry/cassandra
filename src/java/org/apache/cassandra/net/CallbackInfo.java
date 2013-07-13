@@ -30,7 +30,7 @@ import org.apache.cassandra.service.StorageProxy;
 public class CallbackInfo
 {
     protected final InetAddress target;
-    protected final IMessageCallback callback;
+    protected final IAsyncCallback callback;
     protected final MessageOut<?> sentMessage;
     protected final IVersionedSerializer<?> serializer;
 
@@ -41,12 +41,12 @@ public class CallbackInfo
      * @param callback
      * @param serializer serializer to deserialize response message
      */
-    public CallbackInfo(InetAddress target, IMessageCallback callback, IVersionedSerializer<?> serializer)
+    public CallbackInfo(InetAddress target, IAsyncCallback callback, IVersionedSerializer<?> serializer)
     {
         this(target, callback, null, serializer);
     }
 
-    public CallbackInfo(InetAddress target, IMessageCallback callback, MessageOut<?> sentMessage, IVersionedSerializer<?> serializer)
+    public CallbackInfo(InetAddress target, IAsyncCallback callback, MessageOut<?> sentMessage, IVersionedSerializer<?> serializer)
     {
         this.target = target;
         this.callback = callback;
@@ -55,10 +55,10 @@ public class CallbackInfo
     }
 
     /**
-     * @return TRUE if a hint should be written for this target and if the CL was achieved. FALSE otherwise.
+     * @return TRUE iff a hint should be written for this target.
      *
      * NOTE:
-     * Assumes it is only called after the write of "message" to "target" has timed out.
+     * Assumes it is only called after the write of "sentMessage" to "target" has timed out.
      */
     public boolean shouldHint()
     {

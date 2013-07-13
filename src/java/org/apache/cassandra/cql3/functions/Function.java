@@ -31,9 +31,12 @@ public interface Function
 
     public ByteBuffer execute(List<ByteBuffer> parameters) throws InvalidRequestException;
 
+    // Whether the function is a pure function (as in doesn't depend on, nor produce side effects).
+    public boolean isPure();
+
     public interface Factory
     {
-        // We allow the function to be parametered by the table it is part of because the
+        // We allow the function to be parametered by the keyspace it is part of because the
         // "token" function needs it (the argument depends on the keyValidator). However,
         // for most function, the factory will just always the same function object (see
         // AbstractFunction).

@@ -60,7 +60,7 @@ public class CounterColumnTest extends SchemaLoader
     {
         long delta = 3L;
         CounterUpdateColumn cuc = new CounterUpdateColumn(ByteBufferUtil.bytes("x"), delta, 1L);
-        CounterColumn column = cuc.localCopy(Table.open("Keyspace5").getColumnFamilyStore("Counter1"));
+        CounterColumn column = cuc.localCopy(Keyspace.open("Keyspace5").getColumnFamilyStore("Counter1"));
 
         assert delta == column.total();
         assert 1 == column.value().getShort(0);
@@ -277,15 +277,15 @@ public class CounterColumnTest extends SchemaLoader
 
         CounterColumn original = new CounterColumn(ByteBufferUtil.bytes("x"), state.context, 1L);
         DataOutputBuffer bufOut = new DataOutputBuffer();
-        Column.serializer().serialize(original, bufOut);
+        Column.serializer.serialize(original, bufOut);
         byte[] serialized = bufOut.getData();
 
         ByteArrayInputStream bufIn = new ByteArrayInputStream(serialized, 0, serialized.length);
-        CounterColumn deserialized = (CounterColumn)Column.serializer().deserialize(new DataInputStream(bufIn));
+        CounterColumn deserialized = (CounterColumn) Column.serializer.deserialize(new DataInputStream(bufIn));
         assert original.equals(deserialized);
 
         bufIn = new ByteArrayInputStream(serialized, 0, serialized.length);
-        CounterColumn deserializedOnRemote = (CounterColumn)Column.serializer().deserialize(new DataInputStream(bufIn), ColumnSerializer.Flag.FROM_REMOTE);
+        CounterColumn deserializedOnRemote = (CounterColumn) Column.serializer.deserialize(new DataInputStream(bufIn), ColumnSerializer.Flag.FROM_REMOTE);
         assert deserializedOnRemote.name().equals(original.name());
         assert deserializedOnRemote.total() == original.total();
         assert deserializedOnRemote.value().equals(cc.clearAllDelta(original.value()));

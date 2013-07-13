@@ -21,6 +21,7 @@ package org.apache.cassandra.db;
 import java.nio.ByteBuffer;
 import java.io.IOException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
 
@@ -32,14 +33,16 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
+import com.google.common.util.concurrent.Uninterruptibles;
+
 
 public class RemoveSubColumnTest extends SchemaLoader
 {
     @Test
     public void testRemoveSubColumn() throws IOException, ExecutionException, InterruptedException
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Super1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Super1");
         RowMutation rm;
         DecoratedKey dk = Util.dk("key1");
 
@@ -55,16 +58,16 @@ public class RemoveSubColumnTest extends SchemaLoader
         rm.delete("Super1", cname, 1);
         rm.apply();
 
-        ColumnFamily retrieved = store.getColumnFamily(QueryFilter.getIdentityFilter(dk, "Super1"));
-        assert retrieved.getColumn(cname).isMarkedForDelete();
+        ColumnFamily retrieved = store.getColumnFamily(QueryFilter.getIdentityFilter(dk, "Super1", System.currentTimeMillis()));
+        assert retrieved.getColumn(cname).isMarkedForDelete(System.currentTimeMillis());
         assertNull(Util.cloneAndRemoveDeleted(retrieved, Integer.MAX_VALUE));
     }
 
     @Test
-    public void testRemoveSubColumnAndContainer() throws IOException, ExecutionException, InterruptedException
+    public void testRemoveSubColumnAndContainer()
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Super1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Super1");
         RowMutation rm;
         DecoratedKey dk = Util.dk("key2");
 
@@ -83,16 +86,16 @@ public class RemoveSubColumnTest extends SchemaLoader
 
         // Mark current time and make sure the next insert happens at least
         // one second after the previous one (since gc resolution is the second)
-        int gcbefore = (int)(System.currentTimeMillis() / 1000);
-        Thread.currentThread().sleep(1000);
+        QueryFilter filter = QueryFilter.getIdentityFilter(dk, "Super1", System.currentTimeMillis());
+        Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
 
         // remove the column itself
         rm = new RowMutation("Keyspace1", dk.key);
         rm.delete("Super1", cname, 2);
         rm.apply();
 
-        ColumnFamily retrieved = store.getColumnFamily(QueryFilter.getIdentityFilter(dk, "Super1"), gcbefore);
-        assert retrieved.getColumn(cname).isMarkedForDelete();
+        ColumnFamily retrieved = store.getColumnFamily(filter);
+        assert retrieved.getColumn(cname).isMarkedForDelete(System.currentTimeMillis());
         assertNull(Util.cloneAndRemoveDeleted(retrieved, Integer.MAX_VALUE));
     }
 }

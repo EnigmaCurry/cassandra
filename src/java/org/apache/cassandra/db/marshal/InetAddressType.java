@@ -18,11 +18,12 @@
 package org.apache.cassandra.db.marshal;
 
 import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.cql.jdbc.JdbcInetAddress;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.InetAddressSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class InetAddressType extends AbstractType<InetAddress>
@@ -31,24 +32,9 @@ public class InetAddressType extends AbstractType<InetAddress>
 
     InetAddressType() {} // singleton
 
-    public InetAddress compose(ByteBuffer bytes)
-    {
-        return JdbcInetAddress.instance.compose(bytes);
-    }
-
-    public ByteBuffer decompose(InetAddress value)
-    {
-        return JdbcInetAddress.instance.decompose(value);
-    }
-
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
         return ByteBufferUtil.compareUnsigned(o1, o2);
-    }
-
-    public String getString(ByteBuffer bytes)
-    {
-        return JdbcInetAddress.instance.getString(bytes);
     }
 
     public ByteBuffer fromString(String source) throws MarshalException
@@ -71,20 +57,13 @@ public class InetAddressType extends AbstractType<InetAddress>
         return decompose(address);
     }
 
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        try
-        {
-            InetAddress.getByAddress(ByteBufferUtil.getArray(bytes));
-        }
-        catch (UnknownHostException e)
-        {
-            throw new MarshalException(String.format("Expected 4 or 16 byte inetaddress; got %s", ByteBufferUtil.bytesToHex(bytes)));
-        }
-    }
-
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.INET;
+    }
+
+    public TypeSerializer<InetAddress> getSerializer()
+    {
+        return InetAddressSerializer.instance;
     }
 }

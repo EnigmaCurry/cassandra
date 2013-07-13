@@ -18,9 +18,6 @@
 package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
-import java.util.List;
-
-import org.apache.cassandra.exceptions.InvalidRequestException;
 
 /**
  * Build a potentially composite column name.
@@ -37,7 +34,7 @@ public interface ColumnNameBuilder
 
     /**
      * Add a new ByteBuffer as the next component for this name.
-     * @param bb the ByteBuffer to add
+     * @param t the ByteBuffer to add
      * @param op the relationship this component should respect.
      * @throws IllegalStateException if the builder if full, i.e. if enough component has been added.
      * @return this builder
@@ -54,6 +51,11 @@ public interface ColumnNameBuilder
      * @return the maximum number of component that can still be added to this Builder
      */
     public int remainingCount();
+
+    /**
+     * @return the ith component in this builder.
+     */
+    public ByteBuffer get(int idx);
 
     /**
      * Build the column name.
@@ -73,4 +75,14 @@ public interface ColumnNameBuilder
      * @return the cloned builder.
      */
     public ColumnNameBuilder copy();
+
+    /**
+     * Returns the ith component added to this builder.
+     *
+     * @param i the component to return
+     * @return the ith component added to this builder.
+     * @throws IllegalArgumentException if i >= componentCount().
+     */
+    public ByteBuffer getComponent(int i);
+
 }

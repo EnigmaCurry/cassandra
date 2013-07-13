@@ -41,7 +41,7 @@ import static junit.framework.Assert.assertEquals;
 
 public class KeyCacheTest extends SchemaLoader
 {
-    private static final String TABLE1 = "KeyCacheSpace";
+    private static final String KEYSPACE1 = "KeyCacheSpace";
     private static final String COLUMN_FAMILY1 = "Standard1";
     private static final String COLUMN_FAMILY2 = "Standard2";
 
@@ -56,18 +56,18 @@ public class KeyCacheTest extends SchemaLoader
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        ColumnFamilyStore store = Table.open(TABLE1).getColumnFamilyStore(COLUMN_FAMILY2);
+        ColumnFamilyStore store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COLUMN_FAMILY2);
 
         // empty the cache
         CacheService.instance.invalidateKeyCache();
         assert CacheService.instance.keyCache.size() == 0;
 
         // insert data and force to disk
-        insertData(TABLE1, COLUMN_FAMILY2, 0, 100);
+        insertData(KEYSPACE1, COLUMN_FAMILY2, 0, 100);
         store.forceBlockingFlush();
 
         // populate the cache
-        readData(TABLE1, COLUMN_FAMILY2, 0, 100);
+        readData(KEYSPACE1, COLUMN_FAMILY2, 0, 100);
         assertEquals(100, CacheService.instance.keyCache.size());
 
         // really? our caches don't implement the map interface? (hence no .addAll)
@@ -89,25 +89,24 @@ public class KeyCacheTest extends SchemaLoader
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(COLUMN_FAMILY1);
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COLUMN_FAMILY1);
 
         // just to make sure that everything is clean
         CacheService.instance.invalidateKeyCache();
 
         // KeyCache should start at size 0 if we're caching X% of zero data.
-        int keyCacheSize = CacheService.instance.keyCache.size();
-        assert keyCacheSize == 0 : keyCacheSize;
+        assertEquals(0, CacheService.instance.keyCache.size());
 
         DecoratedKey key1 = Util.dk("key1");
         DecoratedKey key2 = Util.dk("key2");
         RowMutation rm;
 
         // inserts
-        rm = new RowMutation(TABLE1, key1.key);
+        rm = new RowMutation(KEYSPACE1, key1.key);
         rm.add(COLUMN_FAMILY1, ByteBufferUtil.bytes("1"), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
-        rm = new RowMutation(TABLE1, key2.key);
+        rm = new RowMutation(KEYSPACE1, key2.key);
         rm.add(COLUMN_FAMILY1, ByteBufferUtil.bytes("2"), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
 
@@ -120,22 +119,23 @@ public class KeyCacheTest extends SchemaLoader
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
-                                                       10));
+                                                       10,
+                                                       System.currentTimeMillis()));
 
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key2,
                                                        COLUMN_FAMILY1,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
-                                                       10));
+                                                       10,
+                                                       System.currentTimeMillis()));
 
-        assert CacheService.instance.keyCache.size() == 2;
+        assertEquals(2, CacheService.instance.keyCache.size());
 
         Util.compactAll(cfs).get();
-        keyCacheSize = CacheService.instance.keyCache.size();
         // after compaction cache should have entries for
         // new SSTables, if we had 2 keys in cache previously it should become 4
-        assert keyCacheSize == 4 : keyCacheSize;
+        assertEquals(4, CacheService.instance.keyCache.size());
 
         // re-read same keys to verify that key cache didn't grow further
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key1,
@@ -143,14 +143,16 @@ public class KeyCacheTest extends SchemaLoader
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
-                                                       10));
+                                                       10,
+                                                       System.currentTimeMillis()));
 
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key2,
                                                        COLUMN_FAMILY1,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
-                                                       10));
+                                                       10,
+                                                       System.currentTimeMillis()));
 
         assert CacheService.instance.keyCache.size() == 4;
     }

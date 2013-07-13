@@ -35,13 +35,13 @@ public class DynamicEndpointSnitchTest
     public void testSnitch() throws InterruptedException, IOException, ConfigurationException
     {
         // do this because SS needs to be initialized before DES can work properly.
-        StorageService.instance.initClient(0);
+        StorageService.instance.initClient();
         int sleeptime = 150;
         SimpleSnitch ss = new SimpleSnitch();
         DynamicEndpointSnitch dsnitch = new DynamicEndpointSnitch(ss, String.valueOf(ss.hashCode()));
         InetAddress self = FBUtilities.getBroadcastAddress();
         ArrayList<InetAddress> order = new ArrayList<InetAddress>();
-        InetAddress host1 = InetAddress.getByName("127.0.0.1");
+        InetAddress host1 = InetAddress.getByName("127.0.0.4");
         InetAddress host2 = InetAddress.getByName("127.0.0.2");
         InetAddress host3 = InetAddress.getByName("127.0.0.3");
 

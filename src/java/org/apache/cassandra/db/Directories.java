@@ -21,12 +21,14 @@ import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.primitives.Longs;
+import com.google.common.util.concurrent.Uninterruptibles;
+
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -77,37 +79,37 @@ public class Directories
             dataFileLocations[i] = new DataDirectory(new File(locations[i]));
     }
 
-    private final String tablename;
+    private final String keyspacename;
     private final String cfname;
     private final File[] sstableDirectories;
 
-    public static Directories create(String tablename, String cfname)
+    public static Directories create(String keyspacename, String cfname)
     {
         int idx = cfname.indexOf(SECONDARY_INDEX_NAME_SEPARATOR);
         if (idx > 0)
             // secondary index, goes in the same directory than the base cf
-            return new Directories(tablename, cfname, cfname.substring(0, idx));
+            return new Directories(keyspacename, cfname, cfname.substring(0, idx));
         else
-            return new Directories(tablename, cfname, cfname);
+            return new Directories(keyspacename, cfname, cfname);
     }
 
-    private Directories(String tablename, String cfname, String directoryName)
+    private Directories(String keyspacename, String cfname, String directoryName)
     {
-        this.tablename = tablename;
+        this.keyspacename = keyspacename;
         this.cfname = cfname;
         this.sstableDirectories = new File[dataFileLocations.length];
         for (int i = 0; i < dataFileLocations.length; ++i)
-            sstableDirectories[i] = new File(dataFileLocations[i].location, join(tablename, directoryName));
+            sstableDirectories[i] = new File(dataFileLocations[i].location, join(keyspacename, directoryName));
 
         if (!StorageService.instance.isClientMode())
         {
-            for (File dir : sstableDirectories) 
+            for (File dir : sstableDirectories)
             {
-                try 
+                try
                 {
                     FileUtils.createDirectory(dir);
                 }
-                catch (FSError e) 
+                catch (FSError e)
                 {
                     // don't just let the default exception handler do this, we need the create loop to continue
                     logger.error("Failed to create {} directory", dir);
@@ -147,14 +149,7 @@ public class Directories
             // retry after GCing has forced unmap of compacted SSTables so they can be deleted
             // Note: GCInspector will do this already, but only sun JVM supports GCInspector so far
             SSTableDeletingTask.rescheduleFailedTasks();
-            try
-            {
-                Thread.sleep(10000);
-            }
-            catch (InterruptedException e)
-            {
-                throw new AssertionError(e);
-            }
+            Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
             path = getLocationWithMaximumAvailableSpace(estimatedSize);
         }
 
@@ -367,7 +362,7 @@ public class Directories
         private FileFilter getFilter()
         {
             // Note: the prefix needs to include cfname + separator to distinguish between a cfs and it's secondary indexes
-            final String sstablePrefix = tablename + Component.separator + cfname + Component.separator;
+            final String sstablePrefix = keyspacename + Component.separator + cfname + Component.separator;
             return new FileFilter()
             {
                 // This function always return false since accepts adds to the components map
@@ -398,6 +393,7 @@ public class Directories
         }
     }
 
+    @Deprecated
     public File tryGetLeveledManifest()
     {
         for (File dir : sstableDirectories)
@@ -413,14 +409,7 @@ public class Directories
         return null;
     }
 
-    public File getOrCreateLeveledManifest()
-    {
-        File manifestFile = tryGetLeveledManifest();
-        if (manifestFile == null)
-            manifestFile = new File(sstableDirectories[0], cfname + LeveledManifest.EXTENSION);
-        return manifestFile;
-    }
-
+    @Deprecated
     public void snapshotLeveledManifest(String snapshotName)
     {
         File manifest = tryGetLeveledManifest();
@@ -489,188 +478,6 @@ public class Directories
     private static String join(String... s)
     {
         return StringUtils.join(s, File.separator);
-    }
-
-    /**
-     * To check if sstables needs migration, we look at the System directory.
-     * If it does not contain a directory for the schema cfs, we'll attempt a sstable
-     * migration.
-     *
-     * Note that it is mostly harmless to try a migration uselessly, except
-     * maybe for some wasted cpu cycles.
-     */
-    public static boolean sstablesNeedsMigration()
-    {
-        if (StorageService.instance.isClientMode())
-            return false;
-
-        boolean hasSystemKeyspace = false;
-        for (DataDirectory dir : dataFileLocations)
-        {
-            File systemDir = new File(dir.location, Table.SYSTEM_KS);
-            hasSystemKeyspace |= (systemDir.exists() && systemDir.isDirectory());
-            File statusCFDir = new File(systemDir, SystemTable.SCHEMA_KEYSPACES_CF);
-            if (statusCFDir.exists())
-                return false;
-        }
-        if (!hasSystemKeyspace)
-            // This is a brand new node.
-            return false;
-
-        // Check whether the migration might create too long a filename
-        int longestLocation = -1;
-        for (DataDirectory loc : dataFileLocations)
-            longestLocation = Math.max(longestLocation, FileUtils.getCanonicalPath(loc.location).length());
-
-        // Check that migration won't error out halfway through from too-long paths.  For Windows, we need to check
-        // total path length <= 255 (see http://msdn.microsoft.com/en-us/library/aa365247.aspx and discussion on CASSANDRA-2749);
-        // elsewhere, we just need to make sure filename is <= 255.
-        for (KSMetaData ksm : Schema.instance.getTableDefinitions())
-        {
-            String ksname = ksm.name;
-            for (Map.Entry<String, CFMetaData> entry : ksm.cfMetaData().entrySet())
-            {
-                String cfname = entry.getKey();
-
-                // max path is roughly (guess-estimate) <location>/ksname/cfname/snapshots/1324314347102-somename/ksname-cfname-tmp-hb-65536-Statistics.db
-                if (System.getProperty("os.name").startsWith("Windows")
-                    && longestLocation + (ksname.length() + cfname.length()) * 2 + 63 > 255)
-                {
-                    throw new RuntimeException(String.format("Starting with 1.1, keyspace names and column family " +
-                                                             "names must be less than %s characters long. %s/%s doesn't" +
-                                                             " respect that restriction. Please rename your " +
-                                                             "keyspace/column families to respect that restriction " +
-                                                             "before updating.", Schema.NAME_LENGTH, ksname, cfname));
-                }
-
-                if (ksm.name.length() + cfname.length() + 28 > 255)
-                {
-                    throw new RuntimeException("Starting with 1.1, the keyspace name is included in data filenames.  For "
-                                               + ksm.name + "/" + cfname + ", this puts you over the largest possible filename of 255 characters");
-                }
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * Move sstables from the pre-#2749 layout to their new location/names.
-     * This involves:
-     *   - moving each sstable to their CF specific directory
-     *   - rename the sstable to include the keyspace in the filename
-     *
-     * Note that this also move leveled manifests, snapshots and backups.
-     */
-    public static void migrateSSTables()
-    {
-        logger.info("Upgrade from pre-1.1 version detected: migrating sstables to new directory layout");
-
-        for (DataDirectory dir : dataFileLocations)
-        {
-            if (!dir.location.exists() || !dir.location.isDirectory())
-                continue;
-
-            File[] ksDirs = dir.location.listFiles();
-            if (ksDirs != null)
-            {
-                for (File ksDir : ksDirs)
-                {
-                    if (!ksDir.isDirectory())
-                        continue;
-
-                    File[] files = ksDir.listFiles();
-                    if (files != null)
-                    {
-                        for (File file : files)
-                            migrateFile(file, ksDir, null);
-                    }
-
-                    migrateSnapshots(ksDir);
-                    migrateBackups(ksDir);
-                }
-            }
-        }
-    }
-
-    private static void migrateSnapshots(File ksDir)
-    {
-        File snapshotDir = new File(ksDir, SNAPSHOT_SUBDIR);
-        if (!snapshotDir.exists())
-            return;
-
-        File[] snapshots = snapshotDir.listFiles();
-        if (snapshots != null)
-        {
-            for (File snapshot : snapshots)
-            {
-                if (!snapshot.isDirectory())
-                    continue;
-
-                File[] files = snapshot.listFiles();
-                if (files != null)
-                {
-                    for (File f : files)
-                        migrateFile(f, ksDir, join(SNAPSHOT_SUBDIR, snapshot.getName()));
-                }
-                if (!snapshot.delete())
-                    logger.info("Old snapsot directory {} not deleted by migraation as it is not empty", snapshot);
-            }
-        }
-        if (!snapshotDir.delete())
-            logger.info("Old directory {} not deleted by migration as it is not empty", snapshotDir);
-    }
-
-    private static void migrateBackups(File ksDir)
-    {
-        File backupDir = new File(ksDir, BACKUPS_SUBDIR);
-        if (!backupDir.exists())
-            return;
-
-        File[] files = backupDir.listFiles();
-        if (files != null)
-        {
-            for (File f : files)
-                migrateFile(f, ksDir, BACKUPS_SUBDIR);
-        }
-        if (!backupDir.delete())
-            logger.info("Old directory {} not deleted by migration as it is not empty", backupDir);
-    }
-
-    private static void migrateFile(File file, File ksDir, String additionalPath)
-    {
-        if (file.isDirectory())
-            return;
-
-        try
-        {
-            String name = file.getName();
-            boolean isManifest = name.endsWith(LeveledManifest.EXTENSION);
-            int separatorIndex = name.indexOf(Component.separator);
-
-            if (isManifest || (separatorIndex >= 0))
-            {
-                String cfname = isManifest
-                              ? name.substring(0, name.length() - LeveledManifest.EXTENSION.length())
-                              : name.substring(0, separatorIndex);
-
-                int idx = cfname.indexOf(SECONDARY_INDEX_NAME_SEPARATOR); // idx > 0 => secondary index
-                String dirname = idx > 0 ? cfname.substring(0, idx) : cfname;
-                File destDir = getOrCreate(ksDir, dirname, additionalPath);
-
-                File destFile = new File(destDir, isManifest ? name : ksDir.getName() + Component.separator + name);
-                logger.debug(String.format("[upgrade to 1.1] Moving %s to %s", file, destFile));
-                FileUtils.renameWithConfirm(file, destFile);
-            }
-            else
-            {
-                logger.warn("Found unrecognized file {} while migrating sstables from pre 1.1 format, ignoring.", file);
-            }
-        }
-        catch (Exception e)
-        {
-            throw new RuntimeException(String.format("Failed migrating file %s from pre 1.1 format.", file.getPath()), e);
-        }
     }
 
     // Hack for tests, don't use otherwise

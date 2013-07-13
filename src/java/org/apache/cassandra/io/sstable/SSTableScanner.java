@@ -18,9 +18,12 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Iterator;
 
+import com.google.common.util.concurrent.RateLimiter;
+import com.google.common.collect.AbstractIterator;
+
+import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.RowPosition;
@@ -29,6 +32,9 @@ import org.apache.cassandra.db.columniterator.LazyColumnIterator;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.compaction.ICompactionScanner;
 import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -38,76 +44,81 @@ public class SSTableScanner implements ICompactionScanner
     protected final RandomAccessReader dfile;
     protected final RandomAccessReader ifile;
     public final SSTableReader sstable;
-    private OnDiskAtomIterator row;
-    protected boolean exhausted = false;
+    private final DataRange dataRange;
+    private final long stopAt;
+
     protected Iterator<OnDiskAtomIterator> iterator;
-    private final QueryFilter filter;
 
     /**
-     * @param sstable SSTable to scan.
+     * @param sstable SSTable to scan; must not be null
+     * @param filter range of data to fetch; must not be null
+     * @param limiter background i/o RateLimiter; may be null
      */
-    SSTableScanner(SSTableReader sstable, boolean skipCache)
+    SSTableScanner(SSTableReader sstable, DataRange dataRange, RateLimiter limiter)
     {
-        this.dfile = sstable.openDataReader(skipCache);
-        this.ifile = sstable.openIndexReader(skipCache);
+        assert sstable != null;
+
+        this.dfile = limiter == null ? sstable.openDataReader() : sstable.openDataReader(limiter);
+        this.ifile = sstable.openIndexReader();
         this.sstable = sstable;
-        this.filter = null;
+        this.dataRange = dataRange;
+        this.stopAt = computeStopAt();
+        seekToStart();
     }
 
-    /**
-     * @param sstable SSTable to scan.
-     * @param filter filter to use when scanning the columns
-     */
-    SSTableScanner(SSTableReader sstable, QueryFilter filter)
+    private void seekToStart()
     {
-        this.dfile = sstable.openDataReader(false);
-        this.ifile = sstable.openIndexReader(false);
-        this.sstable = sstable;
-        this.filter = filter;
+        if (dataRange.startKey().isMinimum(sstable.partitioner))
+            return;
+
+        long indexPosition = sstable.getIndexScanPosition(dataRange.startKey());
+        // -1 means the key is before everything in the sstable. So just start from the beginning.
+        if (indexPosition == -1)
+            return;
+
+        ifile.seek(indexPosition);
+        try
+        {
+            while (!ifile.isEOF())
+            {
+                indexPosition = ifile.getFilePointer();
+                DecoratedKey indexDecoratedKey = sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(ifile));
+                int comparison = indexDecoratedKey.compareTo(dataRange.startKey());
+                if (comparison >= 0)
+                {
+                    // Found, just read the dataPosition and seek into index and data files
+                    long dataPosition = ifile.readLong();
+                    ifile.seek(indexPosition);
+                    dfile.seek(dataPosition);
+                    break;
+                }
+                else
+                {
+                    RowIndexEntry.serializer.skip(ifile);
+                }
+            }
+        }
+        catch (IOException e)
+        {
+            sstable.markSuspect();
+            throw new CorruptSSTableException(e, sstable.getFilename());
+        }
+
+    }
+
+    private long computeStopAt()
+    {
+        AbstractBounds<RowPosition> keyRange = dataRange.keyRange();
+        if (dataRange.stopKey().isMinimum(sstable.partitioner) || (keyRange instanceof Range && ((Range)keyRange).isWrapAround()))
+            return dfile.length();
+
+        RowIndexEntry position = sstable.getPosition(keyRange.toRowBounds().right, SSTableReader.Operator.GT);
+        return position == null ? dfile.length() : position.position;
     }
 
     public void close() throws IOException
     {
         FileUtils.close(dfile, ifile);
-    }
-
-    public void seekTo(RowPosition seekKey)
-    {
-        try
-        {
-            long indexPosition = sstable.getIndexScanPosition(seekKey);
-            // -1 means the key is before everything in the sstable. So just start from the beginning.
-            if (indexPosition == -1)
-                indexPosition = 0;
-
-            ifile.seek(indexPosition);
-
-            while (!ifile.isEOF())
-            {
-                long startPosition = ifile.getFilePointer();
-                DecoratedKey indexDecoratedKey = sstable.decodeKey(ByteBufferUtil.readWithShortLength(ifile));
-                int comparison = indexDecoratedKey.compareTo(seekKey);
-                if (comparison >= 0)
-                {
-                    // Found, just read the dataPosition and seek into index and data files
-                    long dataPosition = ifile.readLong();
-                    ifile.seek(startPosition);
-                    dfile.seek(dataPosition);
-                    row = null;
-                    return;
-                }
-                else
-                {
-                    RowIndexEntry.serializer.skip(ifile, sstable.descriptor.version);
-                }
-            }
-            exhausted = true;
-        }
-        catch (IOException e)
-        {
-            sstable.markSuspect();
-            throw new CorruptSSTableException(e, ifile.getPath());
-        }
     }
 
     public long getLengthInBytes()
@@ -128,14 +139,14 @@ public class SSTableScanner implements ICompactionScanner
     public boolean hasNext()
     {
         if (iterator == null)
-            iterator = exhausted ? Arrays.asList(new OnDiskAtomIterator[0]).iterator() : createIterator();
+            iterator = createIterator();
         return iterator.hasNext();
     }
 
     public OnDiskAtomIterator next()
     {
         if (iterator == null)
-            iterator = exhausted ? Arrays.asList(new OnDiskAtomIterator[0]).iterator() : createIterator();
+            iterator = createIterator();
         return iterator.next();
     }
 
@@ -146,78 +157,26 @@ public class SSTableScanner implements ICompactionScanner
 
     private Iterator<OnDiskAtomIterator> createIterator()
     {
-        return filter == null ? new KeyScanningIterator() : new FilteredKeyScanningIterator();
+        return new KeyScanningIterator();
     }
 
-    protected class KeyScanningIterator implements Iterator<OnDiskAtomIterator>
+    protected class KeyScanningIterator extends AbstractIterator<OnDiskAtomIterator>
     {
-        protected long finishedAt;
+        private DecoratedKey nextKey;
+        private RowIndexEntry nextEntry;
+        private DecoratedKey currentKey;
+        private RowIndexEntry currentEntry;
 
-        public boolean hasNext()
-        {
-            if (row == null)
-                return !dfile.isEOF();
-            return finishedAt < dfile.length();
-        }
-
-        public OnDiskAtomIterator next()
+        protected OnDiskAtomIterator computeNext()
         {
             try
             {
-                if (row != null)
-                    dfile.seek(finishedAt);
-                assert !dfile.isEOF();
+                if (ifile.isEOF() && nextKey == null)
+                    return endOfData();
 
-                // Read data header
-                DecoratedKey key = sstable.decodeKey(ByteBufferUtil.readWithShortLength(dfile));
-                long dataSize = SSTableReader.readRowSize(dfile, sstable.descriptor);
-                long dataStart = dfile.getFilePointer();
-                finishedAt = dataStart + dataSize;
-
-                row = new SSTableIdentityIterator(sstable, dfile, key, dataStart, dataSize);
-                return row;
-            }
-            catch (IOException e)
-            {
-                sstable.markSuspect();
-                throw new CorruptSSTableException(e, dfile.getPath());
-            }
-        }
-
-        public void remove()
-        {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public String toString()
-        {
-            return getClass().getSimpleName() + "(" + "finishedAt:" + finishedAt + ")";
-        }
-    }
-
-    protected class FilteredKeyScanningIterator implements Iterator<OnDiskAtomIterator>
-    {
-        protected DecoratedKey nextKey;
-        protected RowIndexEntry nextEntry;
-
-        public boolean hasNext()
-        {
-            if (row == null)
-                return !ifile.isEOF();
-            return nextKey != null;
-        }
-
-        public OnDiskAtomIterator next()
-        {
-            try
-            {
-                final DecoratedKey currentKey;
-                final RowIndexEntry currentEntry;
-
-                if (row == null)
+                if (currentKey == null)
                 {
-                    currentKey = sstable.decodeKey(ByteBufferUtil.readWithShortLength(ifile));
+                    currentKey = sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(ifile));
                     currentEntry = RowIndexEntry.serializer.deserialize(ifile, sstable.descriptor.version);
                 }
                 else
@@ -226,6 +185,10 @@ public class SSTableScanner implements ICompactionScanner
                     currentEntry = nextEntry;
                 }
 
+                assert currentEntry.position <= stopAt;
+                if (currentEntry.position == stopAt)
+                    return endOfData();
+
                 if (ifile.isEOF())
                 {
                     nextKey = null;
@@ -233,29 +196,34 @@ public class SSTableScanner implements ICompactionScanner
                 }
                 else
                 {
-                    nextKey = sstable.decodeKey(ByteBufferUtil.readWithShortLength(ifile));
+                    nextKey = sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(ifile));
                     nextEntry = RowIndexEntry.serializer.deserialize(ifile, sstable.descriptor.version);
                 }
 
                 assert !dfile.isEOF();
-                return row = new LazyColumnIterator(currentKey, new IColumnIteratorFactory()
+                if (dataRange.selectsFullRowFor(currentKey.key))
+                {
+                    dfile.seek(currentEntry.position);
+                    ByteBufferUtil.readWithShortLength(dfile); // key
+                    if (sstable.descriptor.version.hasRowSizeAndColumnCount)
+                        dfile.readLong();
+                    long dataSize = (nextEntry == null ? dfile.length() : nextEntry.position) - dfile.getFilePointer();
+                    return new SSTableIdentityIterator(sstable, dfile, currentKey, dataSize);
+                }
+
+                return new LazyColumnIterator(currentKey, new IColumnIteratorFactory()
                 {
                     public OnDiskAtomIterator create()
                     {
-                        return filter.getSSTableColumnIterator(sstable, dfile, currentKey, currentEntry);
+                        return dataRange.columnFilter(currentKey.key).getSSTableColumnIterator(sstable, dfile, currentKey, currentEntry);
                     }
                 });
             }
             catch (IOException e)
             {
                 sstable.markSuspect();
-                throw new CorruptSSTableException(e, ifile.getPath());
+                throw new CorruptSSTableException(e, sstable.getFilename());
             }
-        }
-
-        public void remove()
-        {
-            throw new UnsupportedOperationException();
         }
     }
 
@@ -266,7 +234,6 @@ public class SSTableScanner implements ICompactionScanner
                "dfile=" + dfile +
                " ifile=" + ifile +
                " sstable=" + sstable +
-               " exhausted=" + exhausted +
                ")";
     }
 }

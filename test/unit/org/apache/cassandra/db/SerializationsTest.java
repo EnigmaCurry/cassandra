@@ -20,7 +20,6 @@ package org.apache.cassandra.db;
 
 import org.apache.cassandra.AbstractSerializationsTester;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.CompositeType;
@@ -28,6 +27,7 @@ import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.net.CallbackInfo;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessageOut;
@@ -49,7 +49,7 @@ public class SerializationsTest extends AbstractSerializationsTester
     Statics statics = new Statics();
 
     @BeforeClass
-    public static void loadSchema() throws IOException
+    public static void loadSchema() throws IOException, ConfigurationException
     {
         loadSchema(true);
     }
@@ -68,17 +68,17 @@ public class SerializationsTest extends AbstractSerializationsTester
         IPartitioner part = StorageService.getPartitioner();
         AbstractBounds<RowPosition> bounds = new Range<Token>(part.getRandomToken(), part.getRandomToken()).toRowBounds();
 
-        RangeSliceCommand namesCmd = new RangeSliceCommand(statics.KS, "Standard1", namesPred, bounds, 100);
+        RangeSliceCommand namesCmd = new RangeSliceCommand(statics.KS, "Standard1", statics.readTs, namesPred, bounds, 100);
         MessageOut<RangeSliceCommand> namesCmdMsg = namesCmd.createMessage();
-        RangeSliceCommand emptyRangeCmd = new RangeSliceCommand(statics.KS, "Standard1", emptyRangePred, bounds, 100);
+        RangeSliceCommand emptyRangeCmd = new RangeSliceCommand(statics.KS, "Standard1", statics.readTs, emptyRangePred, bounds, 100);
         MessageOut<RangeSliceCommand> emptyRangeCmdMsg = emptyRangeCmd.createMessage();
-        RangeSliceCommand regRangeCmd = new RangeSliceCommand(statics.KS, "Standard1", nonEmptyRangePred, bounds, 100);
+        RangeSliceCommand regRangeCmd = new RangeSliceCommand(statics.KS, "Standard1", statics.readTs, nonEmptyRangePred, bounds, 100);
         MessageOut<RangeSliceCommand> regRangeCmdMsg = regRangeCmd.createMessage();
-        RangeSliceCommand namesCmdSup = new RangeSliceCommand(statics.KS, "Super1", namesSCPred, bounds, 100);
+        RangeSliceCommand namesCmdSup = new RangeSliceCommand(statics.KS, "Super1", statics.readTs, namesSCPred, bounds, 100);
         MessageOut<RangeSliceCommand> namesCmdSupMsg = namesCmdSup.createMessage();
-        RangeSliceCommand emptyRangeCmdSup = new RangeSliceCommand(statics.KS, "Super1", emptyRangePred, bounds, 100);
+        RangeSliceCommand emptyRangeCmdSup = new RangeSliceCommand(statics.KS, "Super1", statics.readTs, emptyRangePred, bounds, 100);
         MessageOut<RangeSliceCommand> emptyRangeCmdSupMsg = emptyRangeCmdSup.createMessage();
-        RangeSliceCommand regRangeCmdSup = new RangeSliceCommand(statics.KS, "Super1", nonEmptyRangeSCPred, bounds, 100);
+        RangeSliceCommand regRangeCmdSup = new RangeSliceCommand(statics.KS, "Super1", statics.readTs, nonEmptyRangeSCPred, bounds, 100);
         MessageOut<RangeSliceCommand> regRangeCmdSupMsg = regRangeCmdSup.createMessage();
 
         DataOutputStream out = getOutput("db.RangeSliceCommand.bin");
@@ -107,14 +107,14 @@ public class SerializationsTest extends AbstractSerializationsTester
 
         DataInputStream in = getInput("db.RangeSliceCommand.bin");
         for (int i = 0; i < 6; i++)
-            MessageIn.read(in, getVersion(), "id");
+            MessageIn.read(in, getVersion(), -1);
         in.close();
     }
 
     private void testSliceByNamesReadCommandWrite() throws IOException
     {
-        SliceByNamesReadCommand standardCmd = new SliceByNamesReadCommand(statics.KS, statics.Key, statics.StandardCF, namesPred);
-        SliceByNamesReadCommand superCmd = new SliceByNamesReadCommand(statics.KS, statics.Key, statics.SuperCF, namesSCPred);
+        SliceByNamesReadCommand standardCmd = new SliceByNamesReadCommand(statics.KS, statics.Key, statics.StandardCF, statics.readTs, namesPred);
+        SliceByNamesReadCommand superCmd = new SliceByNamesReadCommand(statics.KS, statics.Key, statics.SuperCF, statics.readTs, namesSCPred);
 
         DataOutputStream out = getOutput("db.SliceByNamesReadCommand.bin");
         SliceByNamesReadCommand.serializer.serialize(standardCmd, out, getVersion());
@@ -141,15 +141,15 @@ public class SerializationsTest extends AbstractSerializationsTester
         assert SliceByNamesReadCommand.serializer.deserialize(in, getVersion()) != null;
         assert ReadCommand.serializer.deserialize(in, getVersion()) != null;
         assert ReadCommand.serializer.deserialize(in, getVersion()) != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
         in.close();
     }
 
     private void testSliceFromReadCommandWrite() throws IOException
     {
-        SliceFromReadCommand standardCmd = new SliceFromReadCommand(statics.KS, statics.Key, statics.StandardCF, nonEmptyRangePred);
-        SliceFromReadCommand superCmd = new SliceFromReadCommand(statics.KS, statics.Key, statics.SuperCF, nonEmptyRangeSCPred);
+        SliceFromReadCommand standardCmd = new SliceFromReadCommand(statics.KS, statics.Key, statics.StandardCF, statics.readTs, nonEmptyRangePred);
+        SliceFromReadCommand superCmd = new SliceFromReadCommand(statics.KS, statics.Key, statics.SuperCF, statics.readTs, nonEmptyRangeSCPred);
         
         DataOutputStream out = getOutput("db.SliceFromReadCommand.bin");
         SliceFromReadCommand.serializer.serialize(standardCmd, out, getVersion());
@@ -177,8 +177,8 @@ public class SerializationsTest extends AbstractSerializationsTester
         assert SliceFromReadCommand.serializer.deserialize(in, getVersion()) != null;
         assert ReadCommand.serializer.deserialize(in, getVersion()) != null;
         assert ReadCommand.serializer.deserialize(in, getVersion()) != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
         in.close();
     }
 
@@ -211,27 +211,22 @@ public class SerializationsTest extends AbstractSerializationsTester
 
     private void testRowMutationWrite() throws IOException
     {
-        RowMutation emptyRm = new RowMutation(statics.KS, statics.Key);
         RowMutation standardRowRm = new RowMutation(statics.KS, statics.StandardRow);
         RowMutation superRowRm = new RowMutation(statics.KS, statics.SuperRow);
-        RowMutation standardRm = new RowMutation(statics.KS, statics.Key);
-        standardRm.add(statics.StandardCf);
-        RowMutation superRm = new RowMutation(statics.KS, statics.Key);
-        superRm.add(statics.SuperCf);
+        RowMutation standardRm = new RowMutation(statics.KS, statics.Key, statics.StandardCf);
+        RowMutation superRm = new RowMutation(statics.KS, statics.Key, statics.SuperCf);
         Map<UUID, ColumnFamily> mods = new HashMap<UUID, ColumnFamily>();
         mods.put(statics.StandardCf.metadata().cfId, statics.StandardCf);
         mods.put(statics.SuperCf.metadata().cfId, statics.SuperCf);
         RowMutation mixedRm = new RowMutation(statics.KS, statics.Key, mods);
 
         DataOutputStream out = getOutput("db.RowMutation.bin");
-        RowMutation.serializer.serialize(emptyRm, out, getVersion());
         RowMutation.serializer.serialize(standardRowRm, out, getVersion());
         RowMutation.serializer.serialize(superRowRm, out, getVersion());
         RowMutation.serializer.serialize(standardRm, out, getVersion());
         RowMutation.serializer.serialize(superRm, out, getVersion());
         RowMutation.serializer.serialize(mixedRm, out, getVersion());
 
-        emptyRm.createMessage().serialize(out, getVersion());
         standardRowRm.createMessage().serialize(out, getVersion());
         superRowRm.createMessage().serialize(out, getVersion());
         standardRm.createMessage().serialize(out, getVersion());
@@ -241,7 +236,6 @@ public class SerializationsTest extends AbstractSerializationsTester
         out.close();
 
         // test serializedSize
-        testSerializedSize(emptyRm, RowMutation.serializer);
         testSerializedSize(standardRowRm, RowMutation.serializer);
         testSerializedSize(superRowRm, RowMutation.serializer);
         testSerializedSize(standardRm, RowMutation.serializer);
@@ -252,8 +246,10 @@ public class SerializationsTest extends AbstractSerializationsTester
     @Test
     public void testRowMutationRead() throws IOException
     {
-        if (EXECUTE_WRITES)
-            testRowMutationWrite();
+        // row mutation deserialization requires being able to look up the keyspace in the schema,
+        // so we need to rewrite this each time.  We can go back to testing on-disk data
+        // once we pull RM.keyspace field out.
+        testRowMutationWrite();
 
         DataInputStream in = getInput("db.RowMutation.bin");
         assert RowMutation.serializer.deserialize(in, getVersion()) != null;
@@ -261,13 +257,11 @@ public class SerializationsTest extends AbstractSerializationsTester
         assert RowMutation.serializer.deserialize(in, getVersion()) != null;
         assert RowMutation.serializer.deserialize(in, getVersion()) != null;
         assert RowMutation.serializer.deserialize(in, getVersion()) != null;
-        assert RowMutation.serializer.deserialize(in, getVersion()) != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
         in.close();
     }
 
@@ -303,14 +297,14 @@ public class SerializationsTest extends AbstractSerializationsTester
         assert Truncation.serializer.deserialize(in, getVersion()) != null;
         assert TruncateResponse.serializer.deserialize(in, getVersion()) != null;
         assert TruncateResponse.serializer.deserialize(in, getVersion()) != null;
-        assert MessageIn.read(in, getVersion(), "id") != null;
+        assert MessageIn.read(in, getVersion(), -1) != null;
 
         // set up some fake callbacks so deserialization knows that what it's deserializing is a TruncateResponse
-        MessagingService.instance().setCallbackForTests("tr1", new CallbackInfo(null, null, TruncateResponse.serializer));
-        MessagingService.instance().setCallbackForTests("tr2", new CallbackInfo(null, null, TruncateResponse.serializer));
+        MessagingService.instance().setCallbackForTests(1, new CallbackInfo(null, null, TruncateResponse.serializer));
+        MessagingService.instance().setCallbackForTests(2, new CallbackInfo(null, null, TruncateResponse.serializer));
 
-        assert MessageIn.read(in, getVersion(), "tr1") != null;
-        assert MessageIn.read(in, getVersion(), "tr2") != null;
+        assert MessageIn.read(in, getVersion(), 1) != null;
+        assert MessageIn.read(in, getVersion(), 2) != null;
         in.close();
     }
 
@@ -363,11 +357,11 @@ public class SerializationsTest extends AbstractSerializationsTester
         }};
         private final String StandardCF = "Standard1";
         private final String SuperCF = "Super1";
-        private final ByteBuffer Start = ByteBufferUtil.bytes("Start");
-        private final ByteBuffer Stop = ByteBufferUtil.bytes("Stop");
 
-        private final ColumnFamily StandardCf = ColumnFamily.create(KS, StandardCF);
-        private final ColumnFamily SuperCf = ColumnFamily.create(KS, SuperCF);
+        private final long readTs = 1369935512292L;
+
+        private final ColumnFamily StandardCf = TreeMapBackedSortedColumns.factory.create(KS, StandardCF);
+        private final ColumnFamily SuperCf = TreeMapBackedSortedColumns.factory.create(KS, SuperCF);
 
         private final Row StandardRow = new Row(Util.dk("key0"), StandardCf);
         private final Row SuperRow = new Row(Util.dk("key1"), SuperCf);

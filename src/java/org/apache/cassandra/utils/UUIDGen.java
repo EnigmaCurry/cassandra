@@ -18,14 +18,10 @@
 package org.apache.cassandra.utils;
 
 import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
-import java.util.Enumeration;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.Random;
 import java.util.UUID;
 
@@ -72,6 +68,16 @@ public class UUIDGen
     public static UUID getTimeUUID()
     {
         return new UUID(instance.createTimeSafe(), clockSeqAndNode);
+    }
+
+    /**
+     * Creates a type 1 UUID (time-based UUID) with the timestamp of @param when, in milliseconds.
+     *
+     * @return a UUID instance
+     */
+    public static UUID getTimeUUID(long when)
+    {
+        return new UUID(createTime(fromUnixTimestamp(when)), clockSeqAndNode);
     }
 
     /** creates a type 1 uuid from raw bytes. */
@@ -132,16 +138,30 @@ public class UUIDGen
         return new UUID(createTime(uuidTstamp), MAX_CLOCK_SEQ_AND_NODE);
     }
 
-    public static long unixTimestamp(UUID uuid) {
-        if (uuid.version() != 1)
-            throw new IllegalArgumentException(String.format("Can only retrieve the unix timestamp for version 1 uuid (provided version %d)", uuid.version()));
-
-        long timestamp = uuid.timestamp();
-        return (timestamp / 10000) + START_EPOCH;
+    /**
+     * @param uuid
+     * @return milliseconds since Unix epoch
+     */
+    public static long unixTimestamp(UUID uuid)
+    {
+        return (uuid.timestamp() / 10000) + START_EPOCH;
     }
 
-    private static long fromUnixTimestamp(long tstamp) {
-        return (tstamp - START_EPOCH) * 10000;
+    /**
+     * @param uuid
+     * @return microseconds since Unix epoch
+     */
+    public static long microsTimestamp(UUID uuid)
+    {
+        return (uuid.timestamp() / 10) + START_EPOCH * 1000;
+    }
+
+    /**
+     * @param timestamp milliseconds since Unix epoch
+     * @return
+     */
+    private static long fromUnixTimestamp(long timestamp) {
+        return (timestamp - START_EPOCH) * 10000;
     }
 
     /**
@@ -236,6 +256,7 @@ public class UUIDGen
         return createTime(nanosSince);
     }
 
+    /** @param when time in milliseconds */
     private long createTimeUnsafe(long when)
     {
         return createTimeUnsafe(when, 0);

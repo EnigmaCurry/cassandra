@@ -18,6 +18,7 @@
 package org.apache.cassandra.db;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.filter.IDiskAtomFilter;
 import org.apache.cassandra.io.IVersionedSerializer;
@@ -39,6 +40,11 @@ public class Row
         this.cf = cf;
     }
 
+    public Row(ByteBuffer key, ColumnFamily updates)
+    {
+        this(StorageService.getPartitioner().decorateKey(key), updates);
+    }
+
     @Override
     public String toString()
     {
@@ -48,28 +54,28 @@ public class Row
                ')';
     }
 
-    public int getLiveCount(IDiskAtomFilter filter)
+    public int getLiveCount(IDiskAtomFilter filter, long now)
     {
-        return cf == null ? 0 : filter.getLiveCount(cf);
+        return cf == null ? 0 : filter.getLiveCount(cf, now);
     }
 
     public static class RowSerializer implements IVersionedSerializer<Row>
     {
-        public void serialize(Row row, DataOutput dos, int version) throws IOException
+        public void serialize(Row row, DataOutput out, int version) throws IOException
         {
-            ByteBufferUtil.writeWithShortLength(row.key.key, dos);
-            ColumnFamily.serializer.serialize(row.cf, dos, version);
+            ByteBufferUtil.writeWithShortLength(row.key.key, out);
+            ColumnFamily.serializer.serialize(row.cf, out, version);
         }
 
-        public Row deserialize(DataInput dis, int version, ColumnSerializer.Flag flag, ISortedColumns.Factory factory) throws IOException
+        public Row deserialize(DataInput in, int version, ColumnSerializer.Flag flag) throws IOException
         {
-            return new Row(StorageService.getPartitioner().decorateKey(ByteBufferUtil.readWithShortLength(dis)),
-                           ColumnFamily.serializer.deserialize(dis, flag, factory, version));
+            return new Row(StorageService.getPartitioner().decorateKey(ByteBufferUtil.readWithShortLength(in)),
+                           ColumnFamily.serializer.deserialize(in, flag, version));
         }
 
-        public Row deserialize(DataInput dis, int version) throws IOException
+        public Row deserialize(DataInput in, int version) throws IOException
         {
-            return deserialize(dis, version, ColumnSerializer.Flag.LOCAL, TreeMapBackedSortedColumns.factory());
+            return deserialize(in, version, ColumnSerializer.Flag.LOCAL);
         }
 
         public long serializedSize(Row row, int version)

@@ -36,8 +36,8 @@ public class RemoveColumnFamilyWithFlush1Test extends SchemaLoader
     @Test
     public void testRemoveColumnFamilyWithFlush1() throws IOException, ExecutionException, InterruptedException
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
         RowMutation rm;
         DecoratedKey dk = Util.dk("key1");
 
@@ -53,7 +53,7 @@ public class RemoveColumnFamilyWithFlush1Test extends SchemaLoader
         rm.delete("Standard1", 1);
         rm.apply();
 
-        ColumnFamily retrieved = store.getColumnFamily(QueryFilter.getIdentityFilter(dk, "Standard1"));
+        ColumnFamily retrieved = store.getColumnFamily(QueryFilter.getIdentityFilter(dk, "Standard1", System.currentTimeMillis()));
         assert retrieved.isMarkedForDelete();
         assertNull(retrieved.getColumn(ByteBufferUtil.bytes("Column1")));
         assertNull(Util.cloneAndRemoveDeleted(retrieved, Integer.MAX_VALUE));

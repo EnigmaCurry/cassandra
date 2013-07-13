@@ -24,6 +24,8 @@ import java.util.Map;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /*
@@ -334,11 +336,13 @@ public class DynamicCompositeType extends AbstractCompositeType
             return cmp;
         }
 
+        @Override
         public Void compose(ByteBuffer bytes)
         {
             throw new UnsupportedOperationException();
         }
 
+        @Override
         public ByteBuffer decompose(Void value)
         {
             throw new UnsupportedOperationException();
@@ -354,7 +358,13 @@ public class DynamicCompositeType extends AbstractCompositeType
             throw new UnsupportedOperationException();
         }
 
+        @Override
         public void validate(ByteBuffer bytes)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        public TypeSerializer<Void> getSerializer()
         {
             throw new UnsupportedOperationException();
         }

@@ -79,7 +79,7 @@ def color_text(bval, colormap, displaywidth=None):
 
     if displaywidth is None:
         displaywidth = len(bval)
-    tbr = _make_turn_bits_red_f(colormap['hex'], colormap['text'])
+    tbr = _make_turn_bits_red_f(colormap['blob'], colormap['text'])
     coloredval = colormap['text'] + bits_to_turn_red_re.sub(tbr, bval) + colormap['reset']
     if colormap['text']:
         displaywidth -= bval.count(r'\\')
@@ -96,6 +96,8 @@ def format_value_default(val, colormap, **_):
 _formatters = {}
 
 def format_value(cqltype, val, **kwargs):
+    if val == '' and not cqltype.empty_binary_ok:
+        return format_value_default(val, **kwargs)
     formatter = _formatters.get(cqltype.typename, format_value_default)
     return formatter(val, subtypes=cqltype.subtypes, **kwargs)
 
@@ -107,8 +109,8 @@ def formatter_for(typname):
 
 @formatter_for('blob')
 def format_value_blob(val, colormap, **_):
-    bval = ''.join('%02x' % ord(c) for c in val)
-    return colorme(bval, colormap, 'hex')
+    bval = '0x' + ''.join('%02x' % ord(c) for c in val)
+    return colorme(bval, colormap, 'blob')
 
 def format_python_formatted_type(val, colormap, color):
     bval = str(val)
@@ -202,7 +204,7 @@ def format_value_list(val, encoding, colormap, time_format, float_precision, sub
 
 @formatter_for('set')
 def format_value_set(val, encoding, colormap, time_format, float_precision, subtypes, nullval, **_):
-    return format_simple_collection(subtypes[0], val, '{', '}', encoding, colormap,
+    return format_simple_collection(subtypes[0], sorted(val), '{', '}', encoding, colormap,
                                     time_format, float_precision, nullval)
 
 @formatter_for('map')
@@ -213,7 +215,7 @@ def format_value_map(val, encoding, colormap, time_format, float_precision, subt
                             nullval=nullval)
 
     subkeytype, subvaltype = subtypes
-    subs = [(subformat(k, subkeytype), subformat(v, subvaltype)) for (k, v) in val.items()]
+    subs = [(subformat(k, subkeytype), subformat(v, subvaltype)) for (k, v) in sorted(val.items())]
     bval = '{' + ', '.join(k.strval + ': ' + v.strval for (k, v) in subs) + '}'
     lb, comma, colon, rb = [colormap['collection'] + s + colormap['reset']
                             for s in ('{', ', ', ': ', '}')]

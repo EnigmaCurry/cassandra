@@ -21,6 +21,8 @@ import java.io.*;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.MappedByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.text.DecimalFormat;
 import java.util.Arrays;
 
@@ -29,12 +31,11 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.BlacklistedDirectories;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.CLibrary;
 
 public class FileUtils
 {
@@ -73,7 +74,9 @@ public class FileUtils
 
         try
         {
-            CLibrary.createHardLink(from, to);
+            // Avoiding getAbsolutePath() in case there is ever a difference between that and the the
+            // behavior of nio2.
+            Files.createLink(Paths.get(to.getPath()), Paths.get(from.getPath()));
         }
         catch (IOException e)
         {
@@ -395,7 +398,7 @@ public class FileUtils
                 {
                     File directory = BlacklistedDirectories.maybeMarkUnreadable(e.path);
                     if (directory != null)
-                        Table.removeUnreadableSSTables(directory);
+                        Keyspace.removeUnreadableSSTables(directory);
                 }
                 break;
             case ignore:

@@ -19,8 +19,10 @@ package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.cql.jdbc.JdbcDouble;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.DoubleSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class DoubleType extends AbstractType<Double>
@@ -28,16 +30,6 @@ public class DoubleType extends AbstractType<Double>
     public static final DoubleType instance = new DoubleType();
 
     DoubleType() {} // singleton
-
-    public Double compose(ByteBuffer bytes)
-    {
-        return JdbcDouble.instance.compose(bytes);
-    }
-
-    public ByteBuffer decompose(Double value)
-    {
-        return JdbcDouble.instance.decompose(value);
-    }
 
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
@@ -51,18 +43,6 @@ public class DoubleType extends AbstractType<Double>
         }
 
         return compose(o1).compareTo(compose(o2));
-    }
-
-    public String getString(ByteBuffer bytes)
-    {
-        try
-        {
-            return JdbcDouble.instance.getString(bytes);
-        }
-        catch (org.apache.cassandra.cql.jdbc.MarshalException e)
-        {
-            throw new MarshalException(e.getMessage());
-        }
     }
 
     public ByteBuffer fromString(String source) throws MarshalException
@@ -84,14 +64,13 @@ public class DoubleType extends AbstractType<Double>
       return decompose(d);
     }
 
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        if (bytes.remaining() != 8 && bytes.remaining() != 0)
-            throw new MarshalException(String.format("Expected 8 or 0 byte value for a double (%d)", bytes.remaining()));
-    }
-
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.DOUBLE;
+    }
+
+    public TypeSerializer<Double> getSerializer()
+    {
+        return DoubleSerializer.instance;
     }
 }

@@ -79,7 +79,6 @@ public class ColumnFamilySplit extends InputSplit implements Writable, org.apach
     {
         out.writeUTF(startToken);
         out.writeUTF(endToken);
-        out.writeLong(length);
         out.writeInt(dataNodes.length);
         for (String endpoint : dataNodes)
         {
@@ -91,8 +90,6 @@ public class ColumnFamilySplit extends InputSplit implements Writable, org.apach
     {
         startToken = in.readUTF();
         endToken = in.readUTF();
-        length = in.readLong();
-
         int numOfEndpoints = in.readInt();
         dataNodes = new String[numOfEndpoints];
         for(int i = 0; i < numOfEndpoints; i++)

@@ -27,16 +27,15 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 import org.apache.commons.lang.StringUtils;
+import com.google.common.collect.AbstractIterator;
 
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.columniterator.ISSTableColumnIterator;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.columniterator.SSTableNamesIterator;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -77,29 +76,27 @@ public class NamesQueryFilter implements IDiskAtomFilter
        return new NamesQueryFilter(newColumns, countCQL3Rows);
     }
 
-    public OnDiskAtomIterator getMemtableColumnIterator(ColumnFamily cf, DecoratedKey key)
+    public OnDiskAtomIterator getColumnFamilyIterator(DecoratedKey key, ColumnFamily cf)
     {
-        return Memtable.getNamesIterator(key, cf, this);
+        assert cf != null;
+        return new ByNameColumnIterator(columns.iterator(), cf, key);
     }
 
-    public ISSTableColumnIterator getSSTableColumnIterator(SSTableReader sstable, DecoratedKey key)
+    public OnDiskAtomIterator getSSTableColumnIterator(SSTableReader sstable, DecoratedKey key)
     {
         return new SSTableNamesIterator(sstable, key, columns);
     }
 
-    public ISSTableColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, RowIndexEntry indexEntry)
+    public OnDiskAtomIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, RowIndexEntry indexEntry)
     {
         return new SSTableNamesIterator(sstable, file, key, columns, indexEntry);
     }
 
-    public void collectReducedColumns(ColumnFamily container, Iterator<Column> reducedColumns, int gcBefore)
+    public void collectReducedColumns(ColumnFamily container, Iterator<Column> reducedColumns, int gcBefore, long now)
     {
+        DeletionInfo.InOrderTester tester = container.inOrderDeletionTester();
         while (reducedColumns.hasNext())
-        {
-            Column column = reducedColumns.next();
-            if (QueryFilter.isRelevant(column, container, gcBefore))
-                container.addColumn(column);
-        }
+            container.addIfRelevant(reducedColumns.next(), tester, gcBefore);
     }
 
     public Comparator<Column> getColumnComparator(AbstractType<?> comparator)
@@ -124,49 +121,111 @@ public class NamesQueryFilter implements IDiskAtomFilter
     {
     }
 
-    public int getLiveCount(ColumnFamily cf)
+    public int getLiveCount(ColumnFamily cf, long now)
     {
+        // Note: we could use columnCounter() but we save the object allocation as it's simple enough
+
         if (countCQL3Rows)
-            return cf.hasOnlyTombstones() ? 0 : 1;
+            return cf.hasOnlyTombstones(now) ? 0 : 1;
 
         int count = 0;
         for (Column column : cf)
         {
-            if (column.isLive())
+            if (column.isLive(now))
                 count++;
         }
         return count;
     }
 
-    public static class Serializer implements IVersionedSerializer<NamesQueryFilter>
+    public boolean maySelectPrefix(Comparator<ByteBuffer> cmp, ByteBuffer prefix)
     {
-        public void serialize(NamesQueryFilter f, DataOutput dos, int version) throws IOException
+        for (ByteBuffer column : columns)
         {
-            dos.writeInt(f.columns.size());
-            for (ByteBuffer cName : f.columns)
-            {
-                ByteBufferUtil.writeWithShortLength(cName, dos);
-            }
-            // If we talking against an older node, we have no way to tell him that we want to count CQL3 rows. This does mean that
-            // this node may return less data than required. The workaround being to upgrade all nodes.
-            if (version >= MessagingService.VERSION_12)
-                dos.writeBoolean(f.countCQL3Rows);
+            if (ByteBufferUtil.isPrefix(prefix, column))
+                return true;
+        }
+        return false;
+    }
+
+    public boolean shouldInclude(SSTableReader sstable)
+    {
+        return true;
+    }
+
+    public boolean countCQL3Rows()
+    {
+        return countCQL3Rows;
+    }
+
+    public ColumnCounter columnCounter(AbstractType<?> comparator, long now)
+    {
+        return countCQL3Rows
+             ? new ColumnCounter.GroupByPrefix(now, null, 0)
+             : new ColumnCounter(now);
+    }
+
+    private static class ByNameColumnIterator extends AbstractIterator<OnDiskAtom> implements OnDiskAtomIterator
+    {
+        private final ColumnFamily cf;
+        private final DecoratedKey key;
+        private final Iterator<ByteBuffer> iter;
+
+        public ByNameColumnIterator(Iterator<ByteBuffer> iter, ColumnFamily cf, DecoratedKey key)
+        {
+            this.iter = iter;
+            this.cf = cf;
+            this.key = key;
         }
 
-        public NamesQueryFilter deserialize(DataInput dis, int version) throws IOException
+        public ColumnFamily getColumnFamily()
+        {
+            return cf;
+        }
+
+        public DecoratedKey getKey()
+        {
+            return key;
+        }
+
+        protected OnDiskAtom computeNext()
+        {
+            while (iter.hasNext())
+            {
+                ByteBuffer current = iter.next();
+                Column column = cf.getColumn(current);
+                if (column != null)
+                    return column;
+            }
+            return endOfData();
+        }
+
+        public void close() throws IOException { }
+    }
+
+    public static class Serializer implements IVersionedSerializer<NamesQueryFilter>
+    {
+        public void serialize(NamesQueryFilter f, DataOutput out, int version) throws IOException
+        {
+            out.writeInt(f.columns.size());
+            for (ByteBuffer cName : f.columns)
+            {
+                ByteBufferUtil.writeWithShortLength(cName, out);
+            }
+            out.writeBoolean(f.countCQL3Rows);
+        }
+
+        public NamesQueryFilter deserialize(DataInput in, int version) throws IOException
         {
             throw new UnsupportedOperationException();
         }
 
-        public NamesQueryFilter deserialize(DataInput dis, int version, AbstractType comparator) throws IOException
+        public NamesQueryFilter deserialize(DataInput in, int version, AbstractType comparator) throws IOException
         {
-            int size = dis.readInt();
+            int size = in.readInt();
             SortedSet<ByteBuffer> columns = new TreeSet<ByteBuffer>(comparator);
             for (int i = 0; i < size; ++i)
-                columns.add(ByteBufferUtil.readWithShortLength(dis));
-            boolean countCQL3Rows = version >= MessagingService.VERSION_12
-                                  ? dis.readBoolean()
-                                  : false;
+                columns.add(ByteBufferUtil.readWithShortLength(in));
+            boolean countCQL3Rows = in.readBoolean();
             return new NamesQueryFilter(columns, countCQL3Rows);
         }
 
@@ -179,8 +238,7 @@ public class NamesQueryFilter implements IDiskAtomFilter
                 int cNameSize = cName.remaining();
                 size += sizes.sizeof((short) cNameSize) + cNameSize;
             }
-            if (version >= MessagingService.VERSION_12)
-                size += sizes.sizeof(f.countCQL3Rows);
+            size += sizes.sizeof(f.countCQL3Rows);
             return size;
         }
     }

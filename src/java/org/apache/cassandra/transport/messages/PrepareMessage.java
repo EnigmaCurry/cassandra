@@ -26,20 +26,19 @@ import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.*;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 
 public class PrepareMessage extends Message.Request
 {
     public static final Message.Codec<PrepareMessage> codec = new Message.Codec<PrepareMessage>()
     {
-        public PrepareMessage decode(ChannelBuffer body)
+        public PrepareMessage decode(ChannelBuffer body, int version)
         {
             String query = CBUtil.readLongString(body);
             return new PrepareMessage(query);
         }
 
-        public ChannelBuffer encode(PrepareMessage msg)
+        public ChannelBuffer encode(PrepareMessage msg, int version)
         {
             return CBUtil.longStringToCB(msg.query);
         }
@@ -55,7 +54,7 @@ public class PrepareMessage extends Message.Request
 
     public ChannelBuffer encode()
     {
-        return codec.encode(this);
+        return codec.encode(this, getVersion());
     }
 
     public Message.Response execute(QueryState state)
@@ -72,7 +71,7 @@ public class PrepareMessage extends Message.Request
             if (state.traceNextQuery())
             {
                 state.createTracingSession();
-                Tracing.instance().begin("Preparing CQL3 query", ImmutableMap.of("query", query));
+                Tracing.instance.begin("Preparing CQL3 query", ImmutableMap.of("query", query));
             }
 
             Message.Response response = QueryProcessor.prepare(query, state.getClientState(), false);
@@ -88,7 +87,7 @@ public class PrepareMessage extends Message.Request
         }
         finally
         {
-            Tracing.instance().stopSession();
+            Tracing.instance.stopSession();
         }
     }
 

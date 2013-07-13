@@ -20,8 +20,10 @@ package org.apache.cassandra.db.marshal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 
-import org.apache.cassandra.cql.jdbc.JdbcInteger;
 import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.IntegerSerializer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public final class IntegerType extends AbstractType<BigInteger>
@@ -55,16 +57,6 @@ public final class IntegerType extends AbstractType<BigInteger>
     }
 
     IntegerType() {/* singleton */}
-
-    public BigInteger compose(ByteBuffer bytes)
-    {
-        return JdbcInteger.instance.compose(bytes);
-    }
-
-    public ByteBuffer decompose(BigInteger value)
-    {
-        return JdbcInteger.instance.decompose(value);
-    }
 
     public int compare(ByteBuffer lhs, ByteBuffer rhs)
     {
@@ -124,11 +116,6 @@ public final class IntegerType extends AbstractType<BigInteger>
         return 0;
     }
 
-    public String getString(ByteBuffer bytes)
-    {
-        return JdbcInteger.instance.getString(bytes);
-    }
-
     public ByteBuffer fromString(String source) throws MarshalException
     {
         // Return an empty ByteBuffer for an empty string.
@@ -149,13 +136,13 @@ public final class IntegerType extends AbstractType<BigInteger>
         return decompose(integerType);
     }
 
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        // no invalid integers.
-    }
-
     public CQL3Type asCQL3Type()
     {
         return CQL3Type.Native.VARINT;
+    }
+
+    public TypeSerializer<BigInteger> getSerializer()
+    {
+        return IntegerSerializer.instance;
     }
 }

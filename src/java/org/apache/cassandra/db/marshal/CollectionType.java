@@ -22,6 +22,7 @@ import java.util.List;
 
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.db.Column;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
@@ -111,6 +112,12 @@ public abstract class CollectionType<T> extends AbstractType<T>
         for (ByteBuffer bb : buffers)
             size += 2 + bb.remaining();
         return pack(buffers, elements, size);
+    }
+
+    protected static int getUnsignedShort(ByteBuffer bb)
+    {
+        int length = (bb.get() & 0xFF) << 8;
+        return length | (bb.get() & 0xFF);
     }
 
     public CQL3Type asCQL3Type()

@@ -19,16 +19,15 @@ package org.apache.cassandra.db.columniterator;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.SortedSet;
+
+import com.google.common.collect.AbstractIterator;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.ColumnFamilySerializer;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.Column;
-import org.apache.cassandra.db.RowIndexEntry;
-import org.apache.cassandra.db.OnDiskAtom;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.IndexHelper;
@@ -37,9 +36,8 @@ import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileMark;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.IFilter;
 
-public class SSTableNamesIterator extends SimpleAbstractColumnIterator implements ISSTableColumnIterator
+public class SSTableNamesIterator extends AbstractIterator<OnDiskAtom> implements OnDiskAtomIterator
 {
     private ColumnFamily cf;
     private final SSTableReader sstable;
@@ -99,15 +97,9 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
         return fileToClose;
     }
 
-    public SSTableReader getSStable()
-    {
-        return sstable;
-    }
-
     private void read(SSTableReader sstable, FileDataInput file, RowIndexEntry indexEntry)
     throws IOException
     {
-        IFilter bf;
         List<IndexHelper.IndexInfo> indexList;
 
         // If the entry is not indexed or the index is not promoted, read from the row start
@@ -118,34 +110,21 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
             else
                 file.seek(indexEntry.position);
 
-            DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.partitioner,
-                                                             sstable.descriptor,
-                                                             ByteBufferUtil.readWithShortLength(file));
+            DecoratedKey keyInDisk = sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(file));
             assert keyInDisk.equals(key) : String.format("%s != %s in %s", keyInDisk, key, file.getPath());
-            SSTableReader.readRowSize(file, sstable.descriptor);
+            if (sstable.descriptor.version.hasRowSizeAndColumnCount)
+                file.readLong();
         }
 
-        if (sstable.descriptor.version.hasPromotedIndexes)
-        {
-            bf = indexEntry.isIndexed() ? indexEntry.bloomFilter() : null;
-            indexList = indexEntry.columnsIndex();
-        }
-        else
-        {
-            assert file != null;
-            bf = IndexHelper.defreezeBloomFilter(file, sstable.descriptor.version.filterType);
-            indexList = IndexHelper.deserializeIndex(file);
-        }
+        indexList = indexEntry.columnsIndex();
 
         if (!indexEntry.isIndexed())
         {
-            // we can stop early if bloom filter says none of the columns actually exist -- but,
-            // we can't stop before initializing the cf above, in case there's a relevant tombstone
             ColumnFamilySerializer serializer = ColumnFamily.serializer;
             try
             {
-                cf = ColumnFamily.create(sstable.metadata);
-                cf.delete(DeletionInfo.serializer().deserializeFromSSTable(file, sstable.descriptor.version));
+                cf = ArrayBackedSortedColumns.factory.create(sstable.metadata);
+                cf.delete(DeletionTime.serializer.deserialize(file));
             }
             catch (Exception e)
             {
@@ -154,49 +133,28 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
         }
         else
         {
-            cf = ColumnFamily.create(sstable.metadata);
-            cf.delete(indexEntry.deletionInfo());
+            cf = ArrayBackedSortedColumns.factory.create(sstable.metadata);
+            cf.delete(indexEntry.deletionTime());
         }
 
         List<OnDiskAtom> result = new ArrayList<OnDiskAtom>();
-        List<ByteBuffer> filteredColumnNames = new ArrayList<ByteBuffer>(columns.size());
-        for (ByteBuffer name : columns)
-        {
-            if (bf == null || bf.isPresent(name))
-            {
-                filteredColumnNames.add(name);
-            }
-        }
-        if (filteredColumnNames.isEmpty())
-            return;
-
         if (indexList.isEmpty())
         {
-            readSimpleColumns(file, columns, filteredColumnNames, result);
+            int columnCount = sstable.descriptor.version.hasRowSizeAndColumnCount ? file.readInt() : Integer.MAX_VALUE;
+            readSimpleColumns(file, columns, result, columnCount);
         }
         else
         {
-            long basePosition;
-            if (sstable.descriptor.version.hasPromotedIndexes)
-            {
-                basePosition = indexEntry.position;
-            }
-            else
-            {
-                assert file != null;
-                file.readInt(); // column count
-                basePosition = file.getFilePointer();
-            }
-            readIndexedColumns(sstable.metadata, file, columns, filteredColumnNames, indexList, basePosition, result);
+            readIndexedColumns(sstable.metadata, file, columns, indexList, indexEntry.position, result);
         }
 
         // create an iterator view of the columns we read
         iter = result.iterator();
     }
 
-    private void readSimpleColumns(FileDataInput file, SortedSet<ByteBuffer> columnNames, List<ByteBuffer> filteredColumnNames, List<OnDiskAtom> result) throws IOException
+    private void readSimpleColumns(FileDataInput file, SortedSet<ByteBuffer> columnNames, List<OnDiskAtom> result, int columnCount)
     {
-        Iterator<OnDiskAtom> atomIterator = cf.metadata().getOnDiskIterator(file, file.readInt(), sstable.descriptor.version);
+        Iterator<OnDiskAtom> atomIterator = cf.metadata().getOnDiskIterator(file, columnCount, sstable.descriptor.version);
         int n = 0;
         while (atomIterator.hasNext())
         {
@@ -206,7 +164,7 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
                 if (columnNames.contains(column.name()))
                 {
                     result.add(column);
-                    if (n++ > filteredColumnNames.size())
+                    if (++n >= columns.size())
                         break;
                 }
             }
@@ -220,7 +178,6 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
     private void readIndexedColumns(CFMetaData metadata,
                                     FileDataInput file,
                                     SortedSet<ByteBuffer> columnNames,
-                                    List<ByteBuffer> filteredColumnNames,
                                     List<IndexHelper.IndexInfo> indexList,
                                     long basePosition,
                                     List<OnDiskAtom> result)
@@ -230,7 +187,7 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
         AbstractType<?> comparator = metadata.comparator;
         List<IndexHelper.IndexInfo> ranges = new ArrayList<IndexHelper.IndexInfo>();
         int lastIndexIdx = -1;
-        for (ByteBuffer name : filteredColumnNames)
+        for (ByteBuffer name : columns)
         {
             int index = IndexHelper.indexFor(name, indexList, comparator, false, lastIndexIdx);
             if (index < 0 || index == indexList.size())
@@ -285,4 +242,6 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
             return endOfData();
         return iter.next();
     }
+
+    public void close() throws IOException { }
 }

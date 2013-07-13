@@ -28,6 +28,8 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.UUID;
 
+import com.google.common.collect.Iterables;
+
 import org.apache.cassandra.db.filter.NamesQueryFilter;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.net.MessageOut;
@@ -49,14 +51,19 @@ public class CounterMutation implements IMutation
         this.consistency = consistency;
     }
 
-    public String getTable()
+    public String getKeyspaceName()
     {
-        return rowMutation.getTable();
+        return rowMutation.getKeyspaceName();
     }
 
     public Collection<UUID> getColumnFamilyIds()
     {
         return rowMutation.getColumnFamilyIds();
+    }
+
+    public Collection<ColumnFamily> getColumnFamilies()
+    {
+        return rowMutation.getColumnFamilies();
     }
 
     public ByteBuffer key()
@@ -74,22 +81,23 @@ public class CounterMutation implements IMutation
         return consistency;
     }
 
-    public RowMutation makeReplicationMutation() throws IOException
+    public RowMutation makeReplicationMutation()
     {
         List<ReadCommand> readCommands = new LinkedList<ReadCommand>();
+        long timestamp = System.currentTimeMillis();
         for (ColumnFamily columnFamily : rowMutation.getColumnFamilies())
         {
             if (!columnFamily.metadata().getReplicateOnWrite())
                 continue;
-            addReadCommandFromColumnFamily(rowMutation.getTable(), rowMutation.key(), columnFamily, readCommands);
+            addReadCommandFromColumnFamily(rowMutation.getKeyspaceName(), rowMutation.key(), columnFamily, timestamp, readCommands);
         }
 
         // create a replication RowMutation
-        RowMutation replicationMutation = new RowMutation(rowMutation.getTable(), rowMutation.key());
+        RowMutation replicationMutation = new RowMutation(rowMutation.getKeyspaceName(), rowMutation.key());
         for (ReadCommand readCommand : readCommands)
         {
-            Table table = Table.open(readCommand.table);
-            Row row = readCommand.getRow(table);
+            Keyspace keyspace = Keyspace.open(readCommand.ksName);
+            Row row = readCommand.getRow(keyspace);
             if (row == null || row.cf == null)
                 continue;
 
@@ -99,14 +107,14 @@ public class CounterMutation implements IMutation
         return replicationMutation;
     }
 
-    private void addReadCommandFromColumnFamily(String table, ByteBuffer key, ColumnFamily columnFamily, List<ReadCommand> commands)
+    private void addReadCommandFromColumnFamily(String keyspaceName, ByteBuffer key, ColumnFamily columnFamily, long timestamp, List<ReadCommand> commands)
     {
-        SortedSet s = new TreeSet<ByteBuffer>(columnFamily.metadata().comparator);
-        s.addAll(columnFamily.getColumnNames());
-        commands.add(new SliceByNamesReadCommand(table, key, columnFamily.metadata().cfName, new NamesQueryFilter(s)));
+        SortedSet<ByteBuffer> s = new TreeSet<ByteBuffer>(columnFamily.metadata().comparator);
+        Iterables.addAll(s, columnFamily.getColumnNames());
+        commands.add(new SliceByNamesReadCommand(keyspaceName, key, columnFamily.metadata().cfName, timestamp, new NamesQueryFilter(s)));
     }
 
-    public MessageOut<CounterMutation> makeMutationMessage() throws IOException
+    public MessageOut<CounterMutation> makeMutationMessage()
     {
         return new MessageOut<CounterMutation>(MessagingService.Verb.COUNTER_MUTATION, this, serializer);
     }
@@ -122,13 +130,13 @@ public class CounterMutation implements IMutation
     public void apply()
     {
         // transform all CounterUpdateColumn to CounterColumn: accomplished by localCopy
-        RowMutation rm = new RowMutation(rowMutation.getTable(), ByteBufferUtil.clone(rowMutation.key()));
-        Table table = Table.open(rm.getTable());
+        RowMutation rm = new RowMutation(rowMutation.getKeyspaceName(), ByteBufferUtil.clone(rowMutation.key()));
+        Keyspace keyspace = Keyspace.open(rm.getKeyspaceName());
 
         for (ColumnFamily cf_ : rowMutation.getColumnFamilies())
         {
             ColumnFamily cf = cf_.cloneMeShallow();
-            ColumnFamilyStore cfs = table.getColumnFamilyStore(cf.id());
+            ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cf.id());
             for (Column column : cf_)
             {
                 cf.addColumn(column.localCopy(cfs), HeapAllocator.instance);
@@ -164,16 +172,16 @@ public class CounterMutation implements IMutation
 
 class CounterMutationSerializer implements IVersionedSerializer<CounterMutation>
 {
-    public void serialize(CounterMutation cm, DataOutput dos, int version) throws IOException
+    public void serialize(CounterMutation cm, DataOutput out, int version) throws IOException
     {
-        RowMutation.serializer.serialize(cm.rowMutation(), dos, version);
-        dos.writeUTF(cm.consistency().name());
+        RowMutation.serializer.serialize(cm.rowMutation(), out, version);
+        out.writeUTF(cm.consistency().name());
     }
 
-    public CounterMutation deserialize(DataInput dis, int version) throws IOException
+    public CounterMutation deserialize(DataInput in, int version) throws IOException
     {
-        RowMutation rm = RowMutation.serializer.deserialize(dis, version);
-        ConsistencyLevel consistency = Enum.valueOf(ConsistencyLevel.class, dis.readUTF());
+        RowMutation rm = RowMutation.serializer.deserialize(in, version);
+        ConsistencyLevel consistency = Enum.valueOf(ConsistencyLevel.class, in.readUTF());
         return new CounterMutation(rm, consistency);
     }
 

@@ -26,7 +26,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.Option;
@@ -35,22 +37,13 @@ import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
 
 import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.AbstractColumnContainer;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.ColumnFamilyType;
-import org.apache.cassandra.db.CounterColumn;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.ExpiringColumn;
-import org.apache.cassandra.db.RangeTombstone;
-import org.apache.cassandra.db.SuperColumns;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.CompositeType;
-import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -270,7 +263,7 @@ public class SSTableImport
         {
             Map<?, ?> unparsedDeletionInfo = (Map<?, ?>) map.get("deletionInfo");
             Number number = (Number) unparsedDeletionInfo.get("markedForDeleteAt");
-            long markedForDeleteAt = number instanceof Long ? (Long) number : ((Integer) number).longValue();
+            long markedForDeleteAt = number instanceof Long ? (Long) number : number.longValue();
             int localDeletionTime = (Integer) unparsedDeletionInfo.get("localDeletionTime");
             if (superColumnName == null)
                 cf.setDeletionInfo(new DeletionInfo(markedForDeleteAt, localDeletionTime));
@@ -320,7 +313,7 @@ public class SSTableImport
      */
     public int importJson(String jsonFile, String keyspace, String cf, String ssTablePath) throws IOException
     {
-        ColumnFamily columnFamily = ColumnFamily.create(keyspace, cf);
+        ColumnFamily columnFamily = TreeMapBackedSortedColumns.factory.create(keyspace, cf);
         IPartitioner<?> partitioner = DatabaseDescriptor.getPartitioner();
 
         int importedKeys = (isSorted) ? importSorted(jsonFile, columnFamily, ssTablePath, partitioner)
@@ -335,7 +328,7 @@ public class SSTableImport
     private int importUnsorted(String jsonFile, ColumnFamily columnFamily, String ssTablePath, IPartitioner<?> partitioner) throws IOException
     {
         int importedKeys = 0;
-        long start = System.currentTimeMillis();
+        long start = System.nanoTime();
 
         JsonParser parser = getParser(jsonFile);
 
@@ -372,14 +365,11 @@ public class SSTableImport
             writer.append(row.getKey(), columnFamily);
             columnFamily.clear();
 
-            // ready the column family for the next row since we might have read deletionInfo metadata
-            columnFamily.delete(DeletionInfo.LIVE);
-
             importedKeys++;
 
-            long current = System.currentTimeMillis();
+            long current = System.nanoTime();
 
-            if (current - start >= 5000) // 5 secs.
+            if (TimeUnit.NANOSECONDS.toSeconds(current - start) >= 5) // 5 secs.
             {
                 System.out.printf("Currently imported %d keys.%n", importedKeys);
                 start = current;
@@ -398,7 +388,7 @@ public class SSTableImport
             IPartitioner<?> partitioner) throws IOException
     {
         int importedKeys = 0; // already imported keys count
-        long start = System.currentTimeMillis();
+        long start = System.nanoTime();
 
         JsonParser parser = getParser(jsonFile);
 
@@ -457,9 +447,9 @@ public class SSTableImport
             importedKeys++;
             lineNumber++;
 
-            long current = System.currentTimeMillis();
+            long current = System.nanoTime();
 
-            if (current - start >= 5000) // 5 secs.
+            if (TimeUnit.NANOSECONDS.toSeconds(current - start) >= 5) // 5 secs.
             {
                 System.out.printf("Currently imported %d keys.%n", importedKeys);
                 start = current;
@@ -495,7 +485,7 @@ public class SSTableImport
      * @throws ParseException on failure to parse JSON input
      * @throws ConfigurationException on configuration error.
      */
-    public static void main(String[] args) throws IOException, ParseException, ConfigurationException
+    public static void main(String[] args) throws ParseException, ConfigurationException
     {
         CommandLineParser parser = new PosixParser();
 
@@ -541,9 +531,9 @@ public class SSTableImport
         }
 
         DatabaseDescriptor.loadSchemas();
-        if (Schema.instance.getNonSystemTables().size() < 1)
+        if (Schema.instance.getNonSystemKeyspaces().size() < 1)
         {
-            String msg = "no non-system tables are defined";
+            String msg = "no non-system keyspaces are defined";
             System.err.println(msg);
             throw new ConfigurationException(msg);
         }

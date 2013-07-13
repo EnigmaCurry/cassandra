@@ -47,13 +47,11 @@ import org.jboss.netty.channel.ChannelFuture;
 import org.jboss.netty.channel.ChannelHandlerContext;
 import org.jboss.netty.channel.ChannelPipeline;
 import org.jboss.netty.channel.ChannelPipelineFactory;
-import org.jboss.netty.channel.ChannelStateEvent;
 import org.jboss.netty.channel.Channels;
 import org.jboss.netty.channel.ExceptionEvent;
 import org.jboss.netty.channel.MessageEvent;
 import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
 import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
-import org.jboss.netty.handler.logging.LoggingHandler;
 import org.jboss.netty.handler.ssl.SslHandler;
 import org.jboss.netty.logging.InternalLoggerFactory;
 import org.jboss.netty.logging.Slf4JLoggerFactory;
@@ -91,6 +89,11 @@ public class SimpleClient
         this.host = host;
         this.port = port;
         this.encryptionOptions = encryptionOptions;
+    }
+
+    public SimpleClient(String host, int port)
+    {
+        this(host, port, new ClientEncryptionOptions());
     }
 
     public void connect(boolean useCompression) throws IOException
@@ -151,6 +154,13 @@ public class SimpleClient
         return (ResultMessage)msg;
     }
 
+    public ResultMessage execute(String query, List<ByteBuffer> values, ConsistencyLevel consistencyLevel)
+    {
+        Message.Response msg = execute(new QueryMessage(query, consistencyLevel, values, -1));
+        assert msg instanceof ResultMessage;
+        return (ResultMessage)msg;
+    }
+
     public ResultMessage.Prepared prepare(String query)
     {
         Message.Response msg = execute(new PrepareMessage(query));
@@ -160,7 +170,7 @@ public class SimpleClient
 
     public ResultMessage executePrepared(byte[] statementId, List<ByteBuffer> values, ConsistencyLevel consistency)
     {
-        Message.Response msg = execute(new ExecuteMessage(statementId, values, consistency));
+        Message.Response msg = execute(new ExecuteMessage(statementId, values, consistency, -1));
         assert msg instanceof ResultMessage;
         return (ResultMessage)msg;
     }

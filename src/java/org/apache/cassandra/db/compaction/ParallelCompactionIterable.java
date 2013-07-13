@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Condition;
 
-import com.google.common.base.Functions;
 import com.google.common.collect.AbstractIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,8 +33,7 @@ import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.columniterator.ICountableColumnIterator;
-import org.apache.cassandra.db.index.SecondaryIndexManager;
+import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.utils.*;
 
@@ -73,18 +71,16 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
         List<CloseableIterator<RowContainer>> sources = new ArrayList<CloseableIterator<RowContainer>>(scanners.size());
         for (ICompactionScanner scanner : scanners)
             sources.add(new Deserializer(scanner, maxInMemorySize));
-        return new Unwrapper(MergeIterator.get(sources, RowContainer.comparator, new Reducer()), controller);
+        return new Unwrapper(MergeIterator.get(sources, RowContainer.comparator, new Reducer()));
     }
 
     private static class Unwrapper extends AbstractIterator<AbstractCompactedRow> implements CloseableIterator<AbstractCompactedRow>
     {
         private final CloseableIterator<CompactedRowContainer> reducer;
-        private final CompactionController controller;
 
-        public Unwrapper(CloseableIterator<CompactedRowContainer> reducer, CompactionController controller)
+        public Unwrapper(CloseableIterator<CompactedRowContainer> reducer)
         {
             this.reducer = reducer;
-            this.controller = controller;
         }
 
         protected AbstractCompactedRow computeNext()
@@ -94,20 +90,9 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
 
             CompactedRowContainer container = reducer.next();
             AbstractCompactedRow compactedRow;
-            try
-            {
-                compactedRow = container.future == null
-                             ? container.row
-                             : new PrecompactedRow(container.key, container.future.get());
-            }
-            catch (InterruptedException e)
-            {
-                throw new AssertionError(e);
-            }
-            catch (ExecutionException e)
-            {
-                throw new RuntimeException(e);
-            }
+            compactedRow = container.future == null
+                         ? container.row
+                         : new PrecompactedRow(container.key, FBUtilities.waitOnFuture(container.future));
 
             return compactedRow;
         }
@@ -121,7 +106,6 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
     private class Reducer extends MergeIterator.Reducer<RowContainer, CompactedRowContainer>
     {
         private final List<RowContainer> rows = new ArrayList<RowContainer>();
-        private int row = 0;
 
         private final ThreadPoolExecutor executor = new DebuggableThreadPoolExecutor(FBUtilities.getAvailableProcessors(),
                                                                                      Integer.MAX_VALUE,
@@ -141,14 +125,10 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
             ParallelCompactionIterable.this.updateCounterFor(rows.size());
             CompactedRowContainer compacted = getCompactedRow(rows);
             rows.clear();
-            if ((row++ % 1000) == 0)
-            {
-                long n = 0;
-                for (ICompactionScanner scanner : scanners)
-                    n += scanner.getCurrentPosition();
-                bytesRead = n;
-                controller.mayThrottle(bytesRead);
-            }
+            long n = 0;
+            for (ICompactionScanner scanner : scanners)
+                n += scanner.getCurrentPosition();
+            bytesRead = n;
             return compacted;
         }
 
@@ -173,7 +153,7 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
                 return new CompactedRowContainer(rows.get(0).getKey(), executor.submit(new MergeTask(rawRows)));
             }
 
-            List<ICountableColumnIterator> iterators = new ArrayList<ICountableColumnIterator>(rows.size());
+            List<OnDiskAtomIterator> iterators = new ArrayList<OnDiskAtomIterator>(rows.size());
             for (RowContainer container : rows)
                 iterators.add(container.row == null ? container.wrapper : new DeserializedColumnIterator(container.row));
             return new CompactedRowContainer(new LazilyCompactedRow(controller, iterators));
@@ -184,6 +164,9 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
             executor.shutdown();
         }
 
+        /**
+         * Merges a set of in-memory rows
+         */
         private class MergeTask implements Callable<ColumnFamily>
         {
             private final List<Row> rows;
@@ -195,30 +178,24 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
 
             public ColumnFamily call() throws Exception
             {
-                ColumnFamily cf = null;
+                final ColumnFamily returnCF = ArrayBackedSortedColumns.factory.create(controller.cfs.metadata);
+
+                List<CloseableIterator<Column>> data = new ArrayList<CloseableIterator<Column>>(rows.size());
                 for (Row row : rows)
                 {
-                    ColumnFamily thisCF = row.cf;
-                    if (cf == null)
-                    {
-                        cf = thisCF;
-                    }
-                    else
-                    {
-                        // addAll is ok even if cf is an ArrayBackedSortedColumns
-                        SecondaryIndexManager.Updater indexer = controller.cfs.indexManager.updaterFor(row.key, false);
-                        cf.addAllWithSizeDelta(thisCF, HeapAllocator.instance, Functions.<Column>identity(), indexer);
-                    }
+                    returnCF.delete(row.cf);
+                    data.add(FBUtilities.closeableIterator(row.cf.iterator()));
                 }
 
-                return PrecompactedRow.removeDeletedAndOldShards(rows.get(0).key, controller, cf);
+                PrecompactedRow.merge(returnCF, data, controller.cfs.indexManager.updaterFor(rows.get(0).key));
+                return PrecompactedRow.removeDeletedAndOldShards(rows.get(0).key, controller, returnCF);
             }
         }
 
-        private class DeserializedColumnIterator implements ICountableColumnIterator
+        private class DeserializedColumnIterator implements OnDiskAtomIterator
         {
             private final Row row;
-            private Iterator<Column> iter;
+            private final Iterator<Column> iter;
 
             public DeserializedColumnIterator(Row row)
             {
@@ -234,16 +211,6 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
             public DecoratedKey getKey()
             {
                 return row.key;
-            }
-
-            public int getColumnCount()
-            {
-                return row.cf.getColumnCount();
-            }
-
-            public void reset()
-            {
-                iter = row.cf.iterator();
             }
 
             public void close() throws IOException {}
@@ -269,7 +236,6 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
     {
         private final LinkedBlockingQueue<RowContainer> queue = new LinkedBlockingQueue<RowContainer>(1);
         private static final RowContainer finished = new RowContainer((Row) null);
-        private Condition condition;
         private final ICompactionScanner scanner;
 
         public Deserializer(ICompactionScanner ssts, final int maxInMemorySize)
@@ -279,11 +245,14 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
             {
                 protected void runMayThrow() throws Exception
                 {
+                    SimpleCondition condition = null;
                     while (true)
                     {
                         if (condition != null)
+                        {
                             condition.await();
-
+                            condition = null;
+                        }
                         if (!scanner.hasNext())
                         {
                             queue.put(finished);
@@ -293,14 +262,14 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
                         SSTableIdentityIterator iter = (SSTableIdentityIterator) scanner.next();
                         if (iter.dataSize > maxInMemorySize)
                         {
-                            logger.debug("parallel lazy deserialize from " + iter.getPath());
+                            logger.debug("parallel lazy deserialize from {}", iter.getPath());
                             condition = new SimpleCondition();
                             queue.put(new RowContainer(new NotifyingSSTableIdentityIterator(iter, condition)));
                         }
                         else
                         {
-                            logger.debug("parallel eager deserialize from " + iter.getPath());
-                            queue.put(new RowContainer(new Row(iter.getKey(), iter.getColumnFamilyWithColumns(TreeMapBackedSortedColumns.factory()))));
+                            logger.debug("parallel eager deserialize from {}", iter.getPath());
+                            queue.put(new RowContainer(new Row(iter.getKey(), iter.getColumnFamilyWithColumns(ArrayBackedSortedColumns.factory))));
                         }
                     }
                 }
@@ -331,12 +300,12 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
     /**
      * a wrapper around SSTII that notifies the given condition when it is closed
      */
-    private static class NotifyingSSTableIdentityIterator implements ICountableColumnIterator
+    private static class NotifyingSSTableIdentityIterator implements OnDiskAtomIterator
     {
         private final SSTableIdentityIterator wrapped;
-        private final Condition condition;
+        private final SimpleCondition condition;
 
-        public NotifyingSSTableIdentityIterator(SSTableIdentityIterator wrapped, Condition condition)
+        public NotifyingSSTableIdentityIterator(SSTableIdentityIterator wrapped, SimpleCondition condition)
         {
             this.wrapped = wrapped;
             this.condition = condition;
@@ -352,20 +321,16 @@ public class ParallelCompactionIterable extends AbstractCompactionIterable
             return wrapped.getKey();
         }
 
-        public int getColumnCount()
-        {
-            return wrapped.getColumnCount();
-        }
-
-        public void reset()
-        {
-            wrapped.reset();
-        }
-
         public void close() throws IOException
         {
-            wrapped.close();
-            condition.signal();
+            try
+            {
+                wrapped.close();
+            }
+            finally
+            {
+                condition.signalAll();
+            }
         }
 
         public boolean hasNext()

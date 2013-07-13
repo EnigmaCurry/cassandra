@@ -28,22 +28,6 @@ import org.apache.cassandra.exceptions.WriteTimeoutException;
  */
 public class ThriftConversion
 {
-    public static ConsistencyLevel toThrift(org.apache.cassandra.db.ConsistencyLevel cl)
-    {
-        switch (cl)
-        {
-            case ANY: return ConsistencyLevel.ANY;
-            case ONE: return ConsistencyLevel.ONE;
-            case TWO: return ConsistencyLevel.TWO;
-            case THREE: return ConsistencyLevel.THREE;
-            case QUORUM: return ConsistencyLevel.QUORUM;
-            case ALL: return ConsistencyLevel.ALL;
-            case LOCAL_QUORUM: return ConsistencyLevel.LOCAL_QUORUM;
-            case EACH_QUORUM: return ConsistencyLevel.EACH_QUORUM;
-        }
-        throw new AssertionError();
-    }
-
     public static org.apache.cassandra.db.ConsistencyLevel fromThrift(ConsistencyLevel cl)
     {
         switch (cl)
@@ -56,11 +40,14 @@ public class ThriftConversion
             case ALL: return org.apache.cassandra.db.ConsistencyLevel.ALL;
             case LOCAL_QUORUM: return org.apache.cassandra.db.ConsistencyLevel.LOCAL_QUORUM;
             case EACH_QUORUM: return org.apache.cassandra.db.ConsistencyLevel.EACH_QUORUM;
+            case SERIAL: return org.apache.cassandra.db.ConsistencyLevel.SERIAL;
         }
         throw new AssertionError();
     }
 
-    public static void rethrow(RequestExecutionException e) throws UnavailableException, TimedOutException
+    // We never return, but returning a RuntimeException allows to write "throw rethrow(e)" without java complaining
+    // for methods that have a return value.
+    public static RuntimeException rethrow(RequestExecutionException e) throws UnavailableException, TimedOutException
     {
         if (e instanceof RequestTimeoutException)
             throw toThrift((RequestTimeoutException)e);
@@ -99,6 +86,8 @@ public class ThriftConversion
                 toe.setAcknowledged_by_batchlog(false);
             else if (wte.writeType == WriteType.BATCH)
                 toe.setAcknowledged_by_batchlog(true);
+            else if (wte.writeType == WriteType.CAS)
+                toe.setPaxos_in_progress(true);
         }
         return toe;
     }

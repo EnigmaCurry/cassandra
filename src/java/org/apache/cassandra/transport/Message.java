@@ -57,19 +57,23 @@ public abstract class Message
 
     public enum Type
     {
-        ERROR        (0,  Direction.RESPONSE, ErrorMessage.codec),
-        STARTUP      (1,  Direction.REQUEST,  StartupMessage.codec),
-        READY        (2,  Direction.RESPONSE, ReadyMessage.codec),
-        AUTHENTICATE (3,  Direction.RESPONSE, AuthenticateMessage.codec),
-        CREDENTIALS  (4,  Direction.REQUEST,  CredentialsMessage.codec),
-        OPTIONS      (5,  Direction.REQUEST,  OptionsMessage.codec),
-        SUPPORTED    (6,  Direction.RESPONSE, SupportedMessage.codec),
-        QUERY        (7,  Direction.REQUEST,  QueryMessage.codec),
-        RESULT       (8,  Direction.RESPONSE, ResultMessage.codec),
-        PREPARE      (9,  Direction.REQUEST,  PrepareMessage.codec),
-        EXECUTE      (10, Direction.REQUEST,  ExecuteMessage.codec),
-        REGISTER     (11, Direction.REQUEST,  RegisterMessage.codec),
-        EVENT        (12, Direction.RESPONSE, EventMessage.codec);
+        ERROR          (0,  Direction.RESPONSE, ErrorMessage.codec),
+        STARTUP        (1,  Direction.REQUEST,  StartupMessage.codec),
+        READY          (2,  Direction.RESPONSE, ReadyMessage.codec),
+        AUTHENTICATE   (3,  Direction.RESPONSE, AuthenticateMessage.codec),
+        CREDENTIALS    (4,  Direction.REQUEST,  CredentialsMessage.codec),
+        OPTIONS        (5,  Direction.REQUEST,  OptionsMessage.codec),
+        SUPPORTED      (6,  Direction.RESPONSE, SupportedMessage.codec),
+        QUERY          (7,  Direction.REQUEST,  QueryMessage.codec),
+        RESULT         (8,  Direction.RESPONSE, ResultMessage.codec),
+        PREPARE        (9,  Direction.REQUEST,  PrepareMessage.codec),
+        EXECUTE        (10, Direction.REQUEST,  ExecuteMessage.codec),
+        REGISTER       (11, Direction.REQUEST,  RegisterMessage.codec),
+        EVENT          (12, Direction.RESPONSE, EventMessage.codec),
+        BATCH          (13, Direction.REQUEST,  BatchMessage.codec),
+        AUTH_CHALLENGE (14, Direction.RESPONSE, AuthChallenge.codec),
+        AUTH_RESPONSE  (15, Direction.REQUEST,  AuthResponse.codec),
+        AUTH_SUCCESS   (16, Direction.RESPONSE, AuthSuccess.codec);
 
         public final int opcode;
         public final Direction direction;
@@ -115,6 +119,7 @@ public abstract class Message
     public final Type type;
     protected volatile Connection connection;
     private volatile int streamId;
+    private volatile int version = Frame.Header.CURRENT_VERSION;
 
     protected Message(Type type)
     {
@@ -140,6 +145,17 @@ public abstract class Message
     public int getStreamId()
     {
         return streamId;
+    }
+
+    public int getVersion()
+    {
+        return version;
+    }
+
+    public Message setVersion(int version)
+    {
+        this.version = version;
+        return this;
     }
 
     public abstract ChannelBuffer encode();
@@ -205,25 +221,34 @@ public abstract class Message
 
             UUID tracingId = isRequest || !isTracing ? null : CBUtil.readUuid(frame.body);
 
-            Message message = frame.header.type.codec.decode(frame.body);
-            message.setStreamId(frame.header.streamId);
-
-            if (isRequest)
+            try
             {
-                assert message instanceof Request;
-                Request req = (Request)message;
-                req.attach(frame.connection);
-                if (isTracing)
-                    req.setTracingRequested();
-            }
-            else
-            {
-                assert message instanceof Response;
-                if (isTracing)
-                    ((Response)message).setTracingId(tracingId);
-            }
+                Message message = frame.header.type.codec.decode(frame.body, frame.header.version);
+                message.setStreamId(frame.header.streamId);
+                message.setVersion(frame.header.version);
 
-            return message;
+                if (isRequest)
+                {
+                    assert message instanceof Request;
+                    Request req = (Request)message;
+                    req.attach(frame.connection);
+                    if (isTracing)
+                        req.setTracingRequested();
+                }
+                else
+                {
+                    assert message instanceof Response;
+                    if (isTracing)
+                        ((Response)message).setTracingId(tracingId);
+                }
+
+                return message;
+            }
+            catch (Exception ex)
+            {
+                // Remember the streamId
+                throw ErrorMessage.wrap(ex, frame.header.streamId);
+            }
         }
     }
 
@@ -252,7 +277,8 @@ public abstract class Message
                 if (((Request)message).isTracingRequested())
                     flags.add(Frame.Header.Flag.TRACING);
             }
-            return Frame.create(message.type, message.getStreamId(), flags, body, message.connection());
+
+            return Frame.create(message.type, message.getStreamId(), message.getVersion(), flags, body, message.connection());
         }
     }
 
@@ -272,23 +298,24 @@ public abstract class Message
             {
                 assert request.connection() instanceof ServerConnection;
                 ServerConnection connection = (ServerConnection)request.connection();
-                connection.validateNewMessage(request.type);
+                QueryState qstate = connection.validateNewMessage(request.type, request.getVersion(), request.getStreamId());
 
-                logger.debug("Received: " + request);
+                logger.debug("Received: {}, v={}", request, request.getVersion());
 
-                Response response = request.execute(connection.getQueryState(request.getStreamId()));
+                Response response = request.execute(qstate);
                 response.setStreamId(request.getStreamId());
+                response.setVersion(request.getVersion());
                 response.attach(connection);
                 connection.applyStateTransition(request.type, response.type);
 
-                logger.debug("Responding: " + response);
+                logger.debug("Responding: {}, v={}", response, response.getVersion());
 
                 ctx.getChannel().write(response);
             }
             catch (Exception ex)
             {
                 // Don't let the exception propagate to exceptionCaught() if we can help it so that we can assign the right streamID.
-                ctx.getChannel().write(ErrorMessage.fromException(ex).setStreamId(request.getStreamId()));
+                ctx.getChannel().write(ErrorMessage.fromException(ex).setStreamId(request.getStreamId()).setVersion(request.getVersion()));
             }
         }
 

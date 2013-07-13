@@ -34,13 +34,8 @@ import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 public abstract class Selection
 {
-    private static final Logger logger = LoggerFactory.getLogger(Selection.class);
-
     private final List<CFDefinition.Name> columnsList;
     private final List<ColumnSpecification> metadata;
     private final boolean collectTimestamps;
@@ -54,6 +49,11 @@ public abstract class Selection
         this.collectTTLs = collectTTLs;
     }
 
+    public ResultSet.Metadata getResultMetadata()
+    {
+        return new ResultSet.Metadata(metadata);
+    }
+
     public static Selection wildcard(CFDefinition cfDef)
     {
         List<CFDefinition.Name> all = new ArrayList<CFDefinition.Name>();
@@ -62,11 +62,16 @@ public abstract class Selection
         return new SimpleSelection(all);
     }
 
+    public static Selection forColumns(List<CFDefinition.Name> columnsList)
+    {
+        return new SimpleSelection(columnsList);
+    }
+
     private static boolean isUsingFunction(List<RawSelector> rawSelectors)
     {
         for (RawSelector rawSelector : rawSelectors)
         {
-            if (!(rawSelector instanceof ColumnIdentifier))
+            if (!(rawSelector.selectable instanceof ColumnIdentifier))
                 return true;
         }
         return false;
@@ -85,18 +90,18 @@ public abstract class Selection
 
     private static Selector makeSelector(CFDefinition cfDef, RawSelector raw, List<CFDefinition.Name> names, List<ColumnSpecification> metadata) throws InvalidRequestException
     {
-        if (raw instanceof ColumnIdentifier)
+        if (raw.selectable instanceof ColumnIdentifier)
         {
-            CFDefinition.Name name = cfDef.get((ColumnIdentifier)raw);
+            CFDefinition.Name name = cfDef.get((ColumnIdentifier)raw.selectable);
             if (name == null)
-                throw new InvalidRequestException(String.format("Undefined name %s in selection clause", raw));
+                throw new InvalidRequestException(String.format("Undefined name %s in selection clause", raw.selectable));
             if (metadata != null)
-                metadata.add(name);
-            return new SimpleSelector(addAndGetIndex(name, names), name.type);
+                metadata.add(raw.alias == null ? name : makeAliasSpec(cfDef, name.type, raw.alias));
+            return new SimpleSelector(name.toString(), addAndGetIndex(name, names), name.type);
         }
-        else if (raw instanceof RawSelector.WritetimeOrTTL)
+        else if (raw.selectable instanceof Selectable.WritetimeOrTTL)
         {
-            RawSelector.WritetimeOrTTL tot = (RawSelector.WritetimeOrTTL)raw;
+            Selectable.WritetimeOrTTL tot = (Selectable.WritetimeOrTTL)raw.selectable;
             CFDefinition.Name name = cfDef.get(tot.id);
             if (name == null)
                 throw new InvalidRequestException(String.format("Undefined name %s in selection clause", tot.id));
@@ -106,18 +111,20 @@ public abstract class Selection
                 throw new InvalidRequestException(String.format("Cannot use selection function %s on collections", tot.isWritetime ? "writeTime" : "ttl"));
 
             if (metadata != null)
-                metadata.add(makeWritetimeOrTTLSpec(cfDef, tot));
-            return new WritetimeOrTTLSelector(addAndGetIndex(name, names), tot.isWritetime);
+                metadata.add(makeWritetimeOrTTLSpec(cfDef, tot, raw.alias));
+            return new WritetimeOrTTLSelector(name.toString(), addAndGetIndex(name, names), tot.isWritetime);
         }
         else
         {
-            RawSelector.WithFunction withFun = (RawSelector.WithFunction)raw;
+            Selectable.WithFunction withFun = (Selectable.WithFunction)raw.selectable;
             List<Selector> args = new ArrayList<Selector>(withFun.args.size());
-            for (RawSelector rawArg : withFun.args)
-                args.add(makeSelector(cfDef, rawArg, names, null));
+            for (Selectable rawArg : withFun.args)
+                args.add(makeSelector(cfDef, new RawSelector(rawArg, null), names, null));
 
             AbstractType<?> returnType = Functions.getReturnType(withFun.functionName, cfDef.cfm.ksName, cfDef.cfm.cfName);
-            ColumnSpecification spec = makeFunctionSpec(cfDef, withFun, returnType);
+            if (returnType == null)
+                throw new InvalidRequestException(String.format("Unknown function '%s'", withFun.functionName));
+            ColumnSpecification spec = makeFunctionSpec(cfDef, withFun, returnType, raw.alias);
             Function fun = Functions.get(withFun.functionName, args, spec);
             if (metadata != null)
                 metadata.add(spec);
@@ -125,23 +132,31 @@ public abstract class Selection
         }
     }
 
-    private static ColumnSpecification makeWritetimeOrTTLSpec(CFDefinition cfDef, RawSelector.WritetimeOrTTL tot)
+    private static ColumnSpecification makeWritetimeOrTTLSpec(CFDefinition cfDef, Selectable.WritetimeOrTTL tot, ColumnIdentifier alias)
     {
         return new ColumnSpecification(cfDef.cfm.ksName,
                                        cfDef.cfm.cfName,
-                                       new ColumnIdentifier(tot.toString(), true),
+                                       alias == null ? new ColumnIdentifier(tot.toString(), true) : alias,
                                        tot.isWritetime ? LongType.instance : Int32Type.instance);
     }
 
-    private static ColumnSpecification makeFunctionSpec(CFDefinition cfDef, RawSelector.WithFunction fun, AbstractType<?> returnType) throws InvalidRequestException
+    private static ColumnSpecification makeFunctionSpec(CFDefinition cfDef,
+                                                        Selectable.WithFunction fun,
+                                                        AbstractType<?> returnType,
+                                                        ColumnIdentifier alias) throws InvalidRequestException
     {
         if (returnType == null)
             throw new InvalidRequestException(String.format("Unknown function %s called in selection clause", fun.functionName));
 
         return new ColumnSpecification(cfDef.cfm.ksName,
                                        cfDef.cfm.cfName,
-                                       new ColumnIdentifier(fun.toString(), true),
+                                       alias == null ? new ColumnIdentifier(fun.toString(), true) : alias,
                                        returnType);
+    }
+
+    private static ColumnSpecification makeAliasSpec(CFDefinition cfDef, AbstractType<?> type, ColumnIdentifier alias)
+    {
+        return new ColumnSpecification(cfDef.cfm.ksName, cfDef.cfm.cfName, alias, type);
     }
 
     public static Selection fromSelectors(CFDefinition cfDef, List<RawSelector> rawSelectors) throws InvalidRequestException
@@ -170,15 +185,17 @@ public abstract class Selection
         else
         {
             List<CFDefinition.Name> names = new ArrayList<CFDefinition.Name>(rawSelectors.size());
+            List<ColumnSpecification> metadata = new ArrayList<ColumnSpecification>(rawSelectors.size());
             for (RawSelector rawSelector : rawSelectors)
             {
-                assert rawSelector instanceof ColumnIdentifier;
-                CFDefinition.Name name = cfDef.get((ColumnIdentifier)rawSelector);
+                assert rawSelector.selectable instanceof ColumnIdentifier;
+                CFDefinition.Name name = cfDef.get((ColumnIdentifier)rawSelector.selectable);
                 if (name == null)
-                    throw new InvalidRequestException(String.format("Undefined name %s in selection clause", rawSelector));
+                    throw new InvalidRequestException(String.format("Undefined name %s in selection clause", rawSelector.selectable));
                 names.add(name);
+                metadata.add(rawSelector.alias == null ? name : makeAliasSpec(cfDef, name.type, rawSelector.alias));
             }
-            return new SimpleSelection(names);
+            return new SimpleSelection(names, metadata);
         }
     }
 
@@ -206,9 +223,9 @@ public abstract class Selection
         return columnsList;
     }
 
-    public ResultSetBuilder resultSetBuilder()
+    public ResultSetBuilder resultSetBuilder(long now)
     {
-        return new ResultSetBuilder();
+        return new ResultSetBuilder(now);
     }
 
     private static ByteBuffer value(Column c)
@@ -233,12 +250,14 @@ public abstract class Selection
         List<ByteBuffer> current;
         final long[] timestamps;
         final int[] ttls;
+        final long now;
 
-        private ResultSetBuilder()
+        private ResultSetBuilder(long now)
         {
             this.resultSet = new ResultSet(metadata);
             this.timestamps = collectTimestamps ? new long[columnsList.size()] : null;
             this.ttls = collectTTLs ? new int[columnsList.size()] : null;
+            this.now = now;
         }
 
         public void add(ByteBuffer v)
@@ -248,18 +267,23 @@ public abstract class Selection
 
         public void add(Column c)
         {
-            current.add(c == null || c.isMarkedForDelete() ? null : value(c));
+            current.add(isDead(c) ? null : value(c));
             if (timestamps != null)
             {
-                timestamps[current.size() - 1] = c.timestamp();
+                timestamps[current.size() - 1] = isDead(c) ? -1 : c.timestamp();
             }
             if (ttls != null)
             {
                 int ttl = -1;
-                if (c instanceof ExpiringColumn)
-                    ttl = ((ExpiringColumn)c).getLocalDeletionTime() - (int) (System.currentTimeMillis() / 1000);
+                if (!isDead(c) && c instanceof ExpiringColumn)
+                    ttl = c.getLocalDeletionTime() - (int) (now / 1000);
                 ttls[current.size() - 1] = ttl;
             }
+        }
+
+        private boolean isDead(Column c)
+        {
+            return c == null || c.isMarkedForDelete(now);
         }
 
         public void newRow() throws InvalidRequestException
@@ -285,12 +309,17 @@ public abstract class Selection
     {
         public SimpleSelection(List<CFDefinition.Name> columnsList)
         {
+            this(columnsList, new ArrayList<ColumnSpecification>(columnsList));
+        }
+
+        public SimpleSelection(List<CFDefinition.Name> columnsList, List<ColumnSpecification> metadata)
+        {
             /*
              * In theory, even a simple selection could have multiple time the same column, so we
              * could filter those duplicate out of columnsList. But since we're very unlikely to
              * get much duplicate in practice, it's more efficient not to bother.
              */
-            super(columnsList, new ArrayList<ColumnSpecification>(columnsList), false, false);
+            super(columnsList, metadata, false, false);
         }
 
         protected List<ByteBuffer> handleRow(ResultSetBuilder rs)
@@ -306,11 +335,13 @@ public abstract class Selection
 
     private static class SimpleSelector implements Selector
     {
+        private final String columnName;
         private final int idx;
         private final AbstractType<?> type;
 
-        public SimpleSelector(int idx, AbstractType<?> type)
+        public SimpleSelector(String columnName, int idx, AbstractType<?> type)
         {
+            this.columnName = columnName;
             this.idx = idx;
             this.type = type;
         }
@@ -322,7 +353,13 @@ public abstract class Selection
 
         public boolean isAssignableTo(ColumnSpecification receiver)
         {
-            return type.equals(receiver.type);
+            return type.asCQL3Type().equals(receiver.type.asCQL3Type());
+        }
+
+        @Override
+        public String toString()
+        {
+            return columnName;
         }
     }
 
@@ -348,17 +385,33 @@ public abstract class Selection
 
         public boolean isAssignableTo(ColumnSpecification receiver)
         {
-            return fun.returnType().equals(receiver.type);
+            return fun.returnType().asCQL3Type().equals(receiver.type.asCQL3Type());
+        }
+
+        @Override
+        public String toString()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.append(fun.name()).append("(");
+            for (int i = 0; i < argSelectors.size(); i++)
+            {
+                if (i > 0)
+                    sb.append(", ");
+                sb.append(argSelectors.get(i));
+            }
+            return sb.append(")").toString();
         }
     }
 
     private static class WritetimeOrTTLSelector implements Selector
     {
+        private final String columnName;
         private final int idx;
         private final boolean isWritetime;
 
-        public WritetimeOrTTLSelector(int idx, boolean isWritetime)
+        public WritetimeOrTTLSelector(String columnName, int idx, boolean isWritetime)
         {
+            this.columnName = columnName;
             this.idx = idx;
             this.isWritetime = isWritetime;
         }
@@ -366,7 +419,10 @@ public abstract class Selection
         public ByteBuffer compute(ResultSetBuilder rs)
         {
             if (isWritetime)
-                return ByteBufferUtil.bytes(rs.timestamps[idx]);
+            {
+                long ts = rs.timestamps[idx];
+                return ts >= 0 ? ByteBufferUtil.bytes(ts) : null;
+            }
 
             int ttl = rs.ttls[idx];
             return ttl > 0 ? ByteBufferUtil.bytes(ttl) : null;
@@ -374,7 +430,13 @@ public abstract class Selection
 
         public boolean isAssignableTo(ColumnSpecification receiver)
         {
-            return receiver.type.equals(isWritetime ? LongType.instance : Int32Type.instance);
+            return receiver.type.asCQL3Type().equals(isWritetime ? CQL3Type.Native.BIGINT : CQL3Type.Native.INT);
+        }
+
+        @Override
+        public String toString()
+        {
+            return columnName;
         }
     }
 

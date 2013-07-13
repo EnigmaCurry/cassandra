@@ -24,6 +24,8 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
 
+import com.google.common.util.concurrent.Uninterruptibles;
+
 class PeriodicCommitLogExecutorService implements ICommitLogExecutorService
 {
     private final BlockingQueue<Runnable> queue;
@@ -67,19 +69,8 @@ class PeriodicCommitLogExecutorService implements ICommitLogExecutorService
             {
                 while (run)
                 {
-                    try
-                    {
-                        submit(syncer).get();
-                        Thread.sleep(DatabaseDescriptor.getCommitLogSyncPeriod());
-                    }
-                    catch (InterruptedException e)
-                    {
-                        throw new AssertionError(e);
-                    }
-                    catch (ExecutionException e)
-                    {
-                        throw new RuntimeException(e);
-                    }
+                    FBUtilities.waitOnFuture(submit(syncer));
+                    Uninterruptibles.sleepUninterruptibly(DatabaseDescriptor.getCommitLogSyncPeriod(), TimeUnit.MILLISECONDS);
                 }
             }
         }, "PERIODIC-COMMIT-LOG-SYNCER").start();

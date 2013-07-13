@@ -30,10 +30,10 @@ import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.*;
-import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
+import org.apache.cassandra.service.pager.PagingState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MD5Digest;
@@ -41,7 +41,7 @@ import org.apache.cassandra.utils.SemanticVersion;
 
 public class QueryProcessor
 {
-    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.0.1");
+    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.1.0");
 
     private static final Logger logger = LoggerFactory.getLogger(QueryProcessor.class);
 
@@ -94,21 +94,6 @@ public class QueryProcessor
         }
     }
 
-    public static void validateColumnName(ByteBuffer column)
-    throws InvalidRequestException
-    {
-        validateColumnNames(Collections.singletonList(column));
-    }
-
-    public static void validateFilter(CFMetaData metadata, IDiskAtomFilter filter)
-    throws InvalidRequestException
-    {
-        if (filter instanceof SliceQueryFilter)
-            validateSliceFilter(metadata, (SliceQueryFilter)filter);
-        else
-            validateColumnNames(((NamesQueryFilter)filter).columns);
-    }
-
     public static void validateSliceFilter(CFMetaData metadata, SliceQueryFilter range)
     throws InvalidRequestException
     {
@@ -122,32 +107,43 @@ public class QueryProcessor
         }
     }
 
-    private static ResultMessage processStatement(CQLStatement statement, ConsistencyLevel cl, QueryState queryState, List<ByteBuffer> variables)
+    private static ResultMessage processStatement(CQLStatement statement, ConsistencyLevel cl, QueryState queryState, List<ByteBuffer> variables, int pageSize, PagingState pageState)
     throws RequestExecutionException, RequestValidationException
     {
+        logger.trace("Process {} @CL.{}", statement, cl);
         ClientState clientState = queryState.getClientState();
-        statement.validate(clientState);
         statement.checkAccess(clientState);
-        ResultMessage result = statement.execute(cl, queryState, variables);
+        statement.validate(clientState);
+        ResultMessage result = statement.execute(cl, queryState, variables, pageSize, pageState);
         return result == null ? new ResultMessage.Void() : result;
     }
 
     public static ResultMessage process(String queryString, ConsistencyLevel cl, QueryState queryState)
     throws RequestExecutionException, RequestValidationException
     {
-        logger.trace("CQL QUERY: {}", queryString);
-        CQLStatement prepared = getStatement(queryString, queryState.getClientState()).statement;
-        if (prepared.getBoundsTerms() > 0)
-            throw new InvalidRequestException("Cannot execute query with bind variables");
-        return processStatement(prepared, cl, queryState, Collections.<ByteBuffer>emptyList());
+        return process(queryString, Collections.<ByteBuffer>emptyList(), cl, queryState, -1, null);
     }
 
-    public static UntypedResultSet process(String query) throws RequestExecutionException
+    public static ResultMessage process(String queryString, List<ByteBuffer> variables, ConsistencyLevel cl, QueryState queryState, int pageSize, PagingState pageState)
+    throws RequestExecutionException, RequestValidationException
+    {
+        CQLStatement prepared = getStatement(queryString, queryState.getClientState()).statement;
+        if (prepared.getBoundsTerms() != variables.size())
+            throw new InvalidRequestException("Invalid amount of bind variables");
+        return processStatement(prepared, cl, queryState, variables, pageSize, pageState);
+    }
+
+    public static CQLStatement parseStatement(String queryStr, QueryState queryState) throws RequestValidationException
+    {
+        return getStatement(queryStr, queryState.getClientState()).statement;
+    }
+
+    public static UntypedResultSet process(String query, ConsistencyLevel cl) throws RequestExecutionException
     {
         try
         {
             QueryState state = new QueryState(new ClientState(true));
-            ResultMessage result = process(query, ConsistencyLevel.ONE, state);
+            ResultMessage result = process(query, cl, state);
             if (result instanceof ResultMessage.Rows)
                 return new UntypedResultSet(((ResultMessage.Rows)result).result);
             else
@@ -165,7 +161,7 @@ public class QueryProcessor
         {
             ClientState state = new ClientState(true);
             QueryState qState = new QueryState(state);
-            state.setKeyspace(Table.SYSTEM_KS);
+            state.setKeyspace(Keyspace.SYSTEM_KS);
             CQLStatement statement = getStatement(query, state).statement;
             statement.validate(state);
             ResultMessage result = statement.executeInternal(qState);
@@ -180,7 +176,7 @@ public class QueryProcessor
         }
         catch (RequestValidationException e)
         {
-            throw new AssertionError(e);
+            throw new RuntimeException("Error validating " + query, e);
         }
     }
 
@@ -201,20 +197,21 @@ public class QueryProcessor
     public static ResultMessage.Prepared prepare(String queryString, ClientState clientState, boolean forThrift)
     throws RequestValidationException
     {
-        logger.trace("CQL QUERY: {}", queryString);
-
         ParsedStatement.Prepared prepared = getStatement(queryString, clientState);
-        ResultMessage.Prepared msg = storePreparedStatement(queryString, prepared, forThrift);
+        ResultMessage.Prepared msg = storePreparedStatement(queryString, clientState.getRawKeyspace(), prepared, forThrift);
 
         assert prepared.statement.getBoundsTerms() == prepared.boundNames.size();
         return msg;
     }
 
-    private static ResultMessage.Prepared storePreparedStatement(String queryString, ParsedStatement.Prepared prepared, boolean forThrift)
+    private static ResultMessage.Prepared storePreparedStatement(String queryString, String keyspace, ParsedStatement.Prepared prepared, boolean forThrift)
     {
+        // Concatenate the current keyspace so we don't mix prepared statements between keyspace (#5352).
+        // (if the keyspace is null, queryString has to have a fully-qualified keyspace so it's fine.
+        String toHash = keyspace == null ? queryString : keyspace + queryString;
         if (forThrift)
         {
-            int statementId = queryString.hashCode();
+            int statementId = toHash.hashCode();
             thriftPreparedStatements.put(statementId, prepared.statement);
             logger.trace(String.format("Stored prepared statement #%d with %d bind markers",
                                        statementId,
@@ -223,16 +220,16 @@ public class QueryProcessor
         }
         else
         {
-            MD5Digest statementId = MD5Digest.compute(queryString);
+            MD5Digest statementId = MD5Digest.compute(toHash);
             logger.trace(String.format("Stored prepared statement %s with %d bind markers",
                                        statementId,
                                        prepared.statement.getBoundsTerms()));
             preparedStatements.put(statementId, prepared.statement);
-            return new ResultMessage.Prepared(statementId, prepared.boundNames);
+            return new ResultMessage.Prepared(statementId, prepared);
         }
     }
 
-    public static ResultMessage processPrepared(CQLStatement statement, ConsistencyLevel cl, QueryState queryState, List<ByteBuffer> variables)
+    public static ResultMessage processPrepared(CQLStatement statement, ConsistencyLevel cl, QueryState queryState, List<ByteBuffer> variables, int pageSize, PagingState pageState)
     throws RequestExecutionException, RequestValidationException
     {
         // Check to see if there are any bound variables to verify
@@ -250,13 +247,23 @@ public class QueryProcessor
                     logger.trace("[{}] '{}'", i+1, variables.get(i));
         }
 
-        return processStatement(statement, cl, queryState, variables);
+        return processStatement(statement, cl, queryState, variables, pageSize, pageState);
+    }
+
+    public static ResultMessage processBatch(BatchStatement batch, ConsistencyLevel cl, QueryState queryState, List<List<ByteBuffer>> variables)
+    throws RequestExecutionException, RequestValidationException
+    {
+        ClientState clientState = queryState.getClientState();
+        batch.checkAccess(clientState);
+        batch.validate(clientState);
+        batch.executeWithPerStatementVariables(cl, queryState, variables);
+        return new ResultMessage.Void();
     }
 
     private static ParsedStatement.Prepared getStatement(String queryStr, ClientState clientState)
     throws RequestValidationException
     {
-        Tracing.trace("Parsing statement");
+        Tracing.trace("Parsing {}", queryStr);
         ParsedStatement statement = parseStatement(queryStr);
 
         // Set keyspace for statement that require login

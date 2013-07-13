@@ -55,7 +55,7 @@ namespace rb CassandraThrift
 # An effort should be made not to break forward-client-compatibility either
 # (e.g. one should avoid removing obsolete fields from the IDL), but no
 # guarantees in this respect are made by the Cassandra project.
-const string VERSION = "19.36.0"
+const string VERSION = "19.37.0"
 
 
 #
@@ -148,10 +148,17 @@ exception TimedOutException {
      */
     1: optional i32 acknowledged_by
 
-    /**
-     * in case of atomic_batch_mutate method this field tells if the batch was written to the batchlog.
+    /** 
+     * in case of atomic_batch_mutate method this field tells if the batch 
+     * was written to the batchlog.  
      */
     2: optional bool acknowledged_by_batchlog
+
+    /** 
+     * for the CAS method, this field tells if we timed out during the paxos
+     * protocol, as opposed to during the commit of our update
+     */
+    3: optional bool paxos_in_progress
 }
 
 /** invalid authentication request (invalid keyspace, user does not exist, or credentials invalid) */
@@ -228,6 +235,7 @@ enum ConsistencyLevel {
     ANY = 6,
     TWO = 7,
     THREE = 8,
+    SERIAL = 9,
 }
 
 /**
@@ -379,6 +387,11 @@ struct EndpointDetails {
     3: optional string rack
 }
 
+struct CASResult {
+    1: required bool success,
+    2: optional list<Column> current_values,
+}
+
 /**
     A TokenRange describes part of the Cassandra ring, it is a mapping from a range to
     endpoints responsible for that range.
@@ -447,6 +460,7 @@ struct CfDef {
     40: optional i32 default_time_to_live,
     41: optional i32 index_interval,
     42: optional string speculative_retry="NONE",
+    43: optional map<string, map<string, string>> triggers,
 
     /* All of the following are now ignored and unsupplied. */
 
@@ -633,6 +647,20 @@ service Cassandra {
            2:required ColumnParent column_parent,
            3:required CounterColumn column,
            4:required ConsistencyLevel consistency_level=ConsistencyLevel.ONE)
+       throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
+
+  /**
+   * Atomic compare and set.
+   *
+   * If the cas is successfull, the success boolean in CASResult will be true and there will be no current_values.
+   * Otherwise, success will be false and current_values will contain the current values for the columns in
+   * expected (that, by definition of compare-and-set, will differ from the values in expected).
+   */
+  CASResult cas(1:required binary key,
+                2:required string column_family,
+                3:list<Column> expected,
+                4:list<Column> updates,
+                5:required ConsistencyLevel consistency_level=ConsistencyLevel.QUORUM)
        throws (1:InvalidRequestException ire, 2:UnavailableException ue, 3:TimedOutException te),
 
   /**

@@ -28,10 +28,11 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintStream;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-
-import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
@@ -40,6 +41,7 @@ import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.CounterColumn;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.ExpiringColumn;
+import org.apache.cassandra.db.TreeMapBackedSortedColumns;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -50,6 +52,7 @@ import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.JSONValue;
 import org.json.simple.parser.ParseException;
+import org.junit.Test;
 
 public class SSTableExportTest extends SchemaLoader
 {
@@ -57,12 +60,37 @@ public class SSTableExportTest extends SchemaLoader
     {
         return bytesToHex(ByteBufferUtil.bytes(str));
     }
+    
+    public SSTableWriter getDummyWriter() throws IOException
+    {
+        File tempSS = tempSSTableFile("Keyspace1", "Standard1");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
+        SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
+
+        // Add rowA
+        cfamily.addColumn(ByteBufferUtil.bytes("colA"), ByteBufferUtil.bytes("valA"), System.currentTimeMillis());
+        writer.append(Util.dk("rowA"), cfamily);
+        cfamily.clear();
+        
+        cfamily.addColumn(ByteBufferUtil.bytes("colB"), ByteBufferUtil.bytes("valB"), System.currentTimeMillis());
+        writer.append(Util.dk("rowB"), cfamily);
+        cfamily.clear();
+        
+        
+        return writer;
+
+    }
+    
+    
+    public PrintStream dummyStream = new PrintStream(new OutputStream(){
+        public void write(int b) throws IOException { throw new IOException(); }
+    });
 
     @Test
     public void testEnumeratekeys() throws IOException
     {
         File tempSS = tempSSTableFile("Keyspace1", "Standard1");
-        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
 
         // Add rowA
@@ -95,7 +123,7 @@ public class SSTableExportTest extends SchemaLoader
     public void testExportSimpleCf() throws IOException, ParseException
     {
         File tempSS = tempSSTableFile("Keyspace1", "Standard1");
-        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
 
         int nowInSec = (int)(System.currentTimeMillis() / 1000) + 42; //live for 42 seconds
@@ -150,7 +178,7 @@ public class SSTableExportTest extends SchemaLoader
     public void testRoundTripStandardCf() throws IOException, ParseException
     {
         File tempSS = tempSSTableFile("Keyspace1", "Standard1");
-        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
 
         // Add rowA
@@ -174,13 +202,13 @@ public class SSTableExportTest extends SchemaLoader
         new SSTableImport().importJson(tempJson.getPath(), "Keyspace1", "Standard1", tempSS2.getPath());
 
         reader = SSTableReader.open(Descriptor.fromFilename(tempSS2.getPath()));
-        QueryFilter qf = QueryFilter.getNamesFilter(Util.dk("rowA"), "Standard1", ByteBufferUtil.bytes("name"));
+        QueryFilter qf = QueryFilter.getNamesFilter(Util.dk("rowA"), "Standard1", ByteBufferUtil.bytes("name"), System.currentTimeMillis());
         ColumnFamily cf = qf.getSSTableColumnIterator(reader).getColumnFamily();
-        qf.collateOnDiskAtom(cf, Collections.singletonList(qf.getSSTableColumnIterator(reader)), Integer.MIN_VALUE);
+        qf.collateOnDiskAtom(cf, qf.getSSTableColumnIterator(reader), Integer.MIN_VALUE);
         assertTrue(cf != null);
         assertTrue(cf.getColumn(ByteBufferUtil.bytes("name")).value().equals(hexToBytes("76616c")));
 
-        qf = QueryFilter.getNamesFilter(Util.dk("rowExclude"), "Standard1", ByteBufferUtil.bytes("name"));
+        qf = QueryFilter.getNamesFilter(Util.dk("rowExclude"), "Standard1", ByteBufferUtil.bytes("name"), System.currentTimeMillis());
         cf = qf.getSSTableColumnIterator(reader).getColumnFamily();
         assert cf == null;
     }
@@ -189,7 +217,7 @@ public class SSTableExportTest extends SchemaLoader
     public void testExportCounterCf() throws IOException, ParseException
     {
         File tempSS = tempSSTableFile("Keyspace1", "Counter1");
-        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Counter1");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Counter1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
 
         // Add rowA
@@ -220,7 +248,7 @@ public class SSTableExportTest extends SchemaLoader
     public void testEscapingDoubleQuotes() throws IOException, ParseException
     {
         File tempSS = tempSSTableFile("Keyspace1", "ValuesWithQuotes");
-        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "ValuesWithQuotes");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "ValuesWithQuotes");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
 
         // Add rowA
@@ -252,7 +280,7 @@ public class SSTableExportTest extends SchemaLoader
     {
 
         File tempSS = tempSSTableFile("Keyspace1", "Standard1");
-        ColumnFamily cfamily = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cfamily = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2);
 
         // Add rowA

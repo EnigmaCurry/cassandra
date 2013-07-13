@@ -32,6 +32,7 @@ import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.io.compress.CompressionParameters;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.MigrationManager;
@@ -52,11 +53,13 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
 
     private final Map<ColumnIdentifier, AbstractType> columns = new HashMap<ColumnIdentifier, AbstractType>();
     private final CFPropDefs properties;
+    private final boolean ifNotExists;
 
-    public CreateColumnFamilyStatement(CFName name, CFPropDefs properties)
+    public CreateColumnFamilyStatement(CFName name, CFPropDefs properties, boolean ifNotExists)
     {
         super(name);
         this.properties = properties;
+        this.ifNotExists = ifNotExists;
 
         try
         {
@@ -79,7 +82,7 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
     }
 
     // Column definitions
-    private Map<ByteBuffer, ColumnDefinition> getColumns() throws InvalidRequestException
+    private Map<ByteBuffer, ColumnDefinition> getColumns()
     {
         Map<ByteBuffer, ColumnDefinition> columnDefs = new HashMap<ByteBuffer, ColumnDefinition>();
         Integer componentIndex = null;
@@ -93,7 +96,7 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
 
         for (Map.Entry<ColumnIdentifier, AbstractType> col : columns.entrySet())
         {
-            columnDefs.put(col.getKey().key, new ColumnDefinition(col.getKey().key, col.getValue(), null, null, null, componentIndex));
+            columnDefs.put(col.getKey().key, ColumnDefinition.regularDef(col.getKey().key, col.getValue(), componentIndex));
         }
 
         return columnDefs;
@@ -101,7 +104,15 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
 
     public void announceMigration() throws RequestValidationException
     {
-        MigrationManager.announceNewColumnFamily(getCFMetaData());
+        try
+        {
+           MigrationManager.announceNewColumnFamily(getCFMetaData());
+        }
+        catch (AlreadyExistsException e)
+        {
+            if (!ifNotExists)
+                throw e;
+        }
     }
 
     public ResultMessage.SchemaChange.Change changeType()
@@ -131,11 +142,13 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
     public void applyPropertiesTo(CFMetaData cfmd) throws RequestValidationException
     {
         cfmd.defaultValidator(defaultValidator)
-            .columnMetadata(getColumns())
             .keyValidator(keyValidator)
-            .keyAliases(keyAliases)
-            .columnAliases(columnAliases)
-            .valueAlias(valueAlias);
+            .columnMetadata(getColumns());
+
+        cfmd.addColumnMetadataFromAliases(keyAliases, keyValidator, ColumnDefinition.Type.PARTITION_KEY);
+        cfmd.addColumnMetadataFromAliases(columnAliases, comparator, ColumnDefinition.Type.CLUSTERING_KEY);
+        if (valueAlias != null)
+            cfmd.addColumnMetadataFromAliases(Collections.<ByteBuffer>singletonList(valueAlias), defaultValidator, ColumnDefinition.Type.COMPACT_VALUE);
 
         properties.applyToCFMetadata(cfmd);
     }
@@ -152,9 +165,12 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
         private boolean useCompactStorage;
         private final Multiset<ColumnIdentifier> definedNames = HashMultiset.create(1);
 
-        public RawStatement(CFName name)
+        private final boolean ifNotExists;
+
+        public RawStatement(CFName name, boolean ifNotExists)
         {
             super(name);
+            this.ifNotExists = ifNotExists;
         }
 
         /**
@@ -174,7 +190,7 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
 
             properties.validate();
 
-            CreateColumnFamilyStatement stmt = new CreateColumnFamilyStatement(cfName, properties);
+            CreateColumnFamilyStatement stmt = new CreateColumnFamilyStatement(cfName, properties, ifNotExists);
             stmt.setBoundTerms(getBoundsTerms());
 
             Map<ByteBuffer, CollectionType> definedCollections = null;
@@ -284,7 +300,7 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
                     stmt.defaultValidator = BytesType.instance;
                     // We need to distinguish between
                     //   * I'm upgrading from thrift so the valueAlias is null
-                    //   * I've define my table with only a PK (and the column value will be empty)
+                    //   * I've defined my table with only a PK (and the column value will be empty)
                     // So, we use an empty valueAlias (rather than null) for the second case
                     stmt.valueAlias = ByteBufferUtil.EMPTY_BYTE_BUFFER;
                 }
@@ -338,13 +354,14 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
             return new ParsedStatement.Prepared(stmt);
         }
 
-        private AbstractType<?> getTypeAndRemove(Map<ColumnIdentifier, AbstractType> columns, ColumnIdentifier t) throws InvalidRequestException, ConfigurationException
+        private AbstractType<?> getTypeAndRemove(Map<ColumnIdentifier, AbstractType> columns, ColumnIdentifier t) throws InvalidRequestException
         {
             AbstractType type = columns.get(t);
             if (type == null)
-                throw new InvalidRequestException(String.format("Unkown definition %s referenced in PRIMARY KEY", t));
+                throw new InvalidRequestException(String.format("Unknown definition %s referenced in PRIMARY KEY", t));
             if (type instanceof CollectionType)
                 throw new InvalidRequestException(String.format("Invalid collection type for PRIMARY KEY component %s", t));
+
             columns.remove(t);
             Boolean isReversed = definedOrdering.get(t);
             return isReversed != null && isReversed ? ReversedType.getInstance(type) : type;

@@ -29,45 +29,35 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
+import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.CompositeType;
+import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableScanner;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
 import static junit.framework.Assert.*;
 
+@RunWith(OrderedJUnit4ClassRunner.class)
 public class CompactionsTest extends SchemaLoader
 {
-    public static final String TABLE1 = "Keyspace1";
-
-    @Test
-    public void testBlacklistingWithSizeTieredCompactionStrategy() throws Exception
-    {
-        testBlacklisting(SizeTieredCompactionStrategy.class.getCanonicalName());
-    }
-
-    @Test
-    public void testBlacklistingWithLeveledCompactionStrategy() throws Exception
-    {
-        testBlacklisting(LeveledCompactionStrategy.class.getCanonicalName());
-    }
+    public static final String KEYSPACE1 = "Keyspace1";
 
     public ColumnFamilyStore testSingleSSTableCompaction(String strategyClassName) throws Exception
     {
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard1");
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
         store.clearUnsafe();
         store.metadata.gcGraceSeconds(1);
         store.setCompactionStrategyClass(strategyClassName);
@@ -79,7 +69,7 @@ public class CompactionsTest extends SchemaLoader
         for (int i = 0; i < 10; i++)
         {
             DecoratedKey key = Util.dk(Integer.toString(i));
-            RowMutation rm = new RowMutation(TABLE1, key.key);
+            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
             for (int j = 0; j < 10; j++)
                 rm.add("Standard1", ByteBufferUtil.bytes(Integer.toString(j)),
                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
@@ -132,15 +122,15 @@ public class CompactionsTest extends SchemaLoader
     @Test
     public void testSuperColumnTombstones() throws IOException, ExecutionException, InterruptedException
     {
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore("Super1");
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Super1");
         cfs.disableAutoCompaction();
 
         DecoratedKey key = Util.dk("tskey");
         ByteBuffer scName = ByteBufferUtil.bytes("TestSuperColumn");
 
         // a subcolumn
-        RowMutation rm = new RowMutation(TABLE1, key.key);
+        RowMutation rm = new RowMutation(KEYSPACE1, key.key);
         rm.add("Super1", CompositeType.build(scName, ByteBufferUtil.bytes(0)),
                ByteBufferUtil.EMPTY_BYTE_BUFFER,
                FBUtilities.timestampMicros());
@@ -148,7 +138,7 @@ public class CompactionsTest extends SchemaLoader
         cfs.forceBlockingFlush();
 
         // shadow the subcolumn with a supercolumn tombstone
-        rm = new RowMutation(TABLE1, key.key);
+        rm = new RowMutation(KEYSPACE1, key.key);
         rm.deleteRange("Super1", SuperColumns.startOf(scName), SuperColumns.endOf(scName), FBUtilities.timestampMicros());
         rm.apply();
         cfs.forceBlockingFlush();
@@ -158,8 +148,8 @@ public class CompactionsTest extends SchemaLoader
 
         // check that the shadowed column is gone
         SSTableReader sstable = cfs.getSSTables().iterator().next();
-        SSTableScanner scanner = sstable.getScanner(new QueryFilter(null, "Super1", new IdentityQueryFilter()));
-        scanner.seekTo(key);
+        Range keyRange = new Range<RowPosition>(key, sstable.partitioner.getMinimumToken().maxKeyBound());
+        SSTableScanner scanner = sstable.getScanner(DataRange.forKeyRange(keyRange));
         OnDiskAtomIterator iter = scanner.next();
         assertEquals(key, iter.getKey());
         assert iter.next() instanceof RangeTombstone;
@@ -179,8 +169,8 @@ public class CompactionsTest extends SchemaLoader
     {
         // This test check that EchoedRow doesn't skipp rows: see CASSANDRA-2653
 
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard2");
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard2");
 
         // disable compaction while flushing
         cfs.disableAutoCompaction();
@@ -190,7 +180,7 @@ public class CompactionsTest extends SchemaLoader
         for (int i=1; i < 5; i++)
         {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            RowMutation rm = new RowMutation(TABLE1, key.key);
+            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
             rm.add("Standard2", ByteBufferUtil.bytes(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
             rm.apply();
 
@@ -205,7 +195,7 @@ public class CompactionsTest extends SchemaLoader
         for (int i=1; i < 5; i++)
         {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            RowMutation rm = new RowMutation(TABLE1, key.key);
+            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
             rm.add("Standard2", ByteBufferUtil.bytes(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
             rm.apply();
         }
@@ -221,7 +211,7 @@ public class CompactionsTest extends SchemaLoader
         assertEquals(2, cfs.getSSTables().size());
 
         // Now, we remove the sstable that was just created to force the use of EchoedRow (so that it doesn't hide the problem)
-        cfs.markCompacted(Collections.singleton(tmpSSTable), OperationType.UNKNOWN);
+        cfs.markObsolete(Collections.singleton(tmpSSTable), OperationType.UNKNOWN);
         assertEquals(1, cfs.getSSTables().size());
 
         // Now assert we do have the 4 keys
@@ -231,21 +221,18 @@ public class CompactionsTest extends SchemaLoader
     @Test
     public void testDontPurgeAccidentaly() throws IOException, ExecutionException, InterruptedException
     {
-        // Testing with and without forcing deserialization. Without deserialization, EchoedRow will be used.
-        testDontPurgeAccidentaly("test1", "Super5", false);
-        testDontPurgeAccidentaly("test2", "Super5", true);
+        testDontPurgeAccidentaly("test1", "Super5");
 
         // Use CF with gc_grace=0, see last bug of CASSANDRA-2786
-        testDontPurgeAccidentaly("test1", "SuperDirectGC", false);
-        testDontPurgeAccidentaly("test2", "SuperDirectGC", true);
+        testDontPurgeAccidentaly("test1", "SuperDirectGC");
     }
 
     @Test
     public void testUserDefinedCompaction() throws Exception
     {
-        Table table = Table.open(TABLE1);
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
         final String cfname = "Standard3"; // use clean(no sstable) CF
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(cfname);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
 
         // disable compaction while flushing
         cfs.disableAutoCompaction();
@@ -253,7 +240,7 @@ public class CompactionsTest extends SchemaLoader
         final int ROWS_PER_SSTABLE = 10;
         for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            RowMutation rm = new RowMutation(TABLE1, key.key);
+            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
             rm.add(cfname, ByteBufferUtil.bytes("col"),
                    ByteBufferUtil.EMPTY_BYTE_BUFFER,
                    System.currentTimeMillis());
@@ -268,7 +255,7 @@ public class CompactionsTest extends SchemaLoader
         int prevGeneration = sstable.descriptor.generation;
         String file = new File(sstable.descriptor.filenameFor(Component.DATA)).getName();
         // submit user defined compaction on flushed sstable
-        CompactionManager.instance.forceUserDefinedCompaction(TABLE1, file);
+        CompactionManager.instance.forceUserDefinedCompaction(file);
         // wait until user defined compaction finishes
         do
         {
@@ -283,11 +270,11 @@ public class CompactionsTest extends SchemaLoader
     @Test
     public void testCompactionLog() throws Exception
     {
-        SystemTable.discardCompactionsInProgress();
+        SystemKeyspace.discardCompactionsInProgress();
 
         String cf = "Standard4";
-        ColumnFamilyStore cfs = Table.open(TABLE1).getColumnFamilyStore(cf);
-        insertData(TABLE1, cf, 0, 1);
+        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
+        insertData(KEYSPACE1, cf, 0, 1);
         cfs.forceBlockingFlush();
 
         Collection<SSTableReader> sstables = cfs.getSSTables();
@@ -299,21 +286,21 @@ public class CompactionsTest extends SchemaLoader
                 return sstable.descriptor.generation;
             }
         }));
-        UUID taskId = SystemTable.startCompaction(cfs, sstables);
-        SetMultimap<Pair<String, String>, Integer> compactionLogs = SystemTable.getUnfinishedCompactions();
-        Set<Integer> unfinishedCompactions = compactionLogs.get(Pair.create(TABLE1, cf));
+        UUID taskId = SystemKeyspace.startCompaction(cfs, sstables);
+        SetMultimap<Pair<String, String>, Integer> compactionLogs = SystemKeyspace.getUnfinishedCompactions();
+        Set<Integer> unfinishedCompactions = compactionLogs.get(Pair.create(KEYSPACE1, cf));
         assert unfinishedCompactions.containsAll(generations);
 
-        SystemTable.finishCompaction(taskId);
-        compactionLogs = SystemTable.getUnfinishedCompactions();
-        assert !compactionLogs.containsKey(Pair.create(TABLE1, cf));
+        SystemKeyspace.finishCompaction(taskId);
+        compactionLogs = SystemKeyspace.getUnfinishedCompactions();
+        assert !compactionLogs.containsKey(Pair.create(KEYSPACE1, cf));
     }
 
-    private void testDontPurgeAccidentaly(String k, String cfname, boolean forceDeserialize) throws IOException, ExecutionException, InterruptedException
+    private void testDontPurgeAccidentaly(String k, String cfname) throws IOException, ExecutionException, InterruptedException
     {
         // This test catches the regression of CASSANDRA-2786
-        Table table = Table.open(TABLE1);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(cfname);
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
 
         // disable compaction while flushing
         cfs.clearUnsafe();
@@ -321,7 +308,7 @@ public class CompactionsTest extends SchemaLoader
 
         // Add test row
         DecoratedKey key = Util.dk(k);
-        RowMutation rm = new RowMutation(TABLE1, key.key);
+        RowMutation rm = new RowMutation(KEYSPACE1, key.key);
         rm.add(cfname, CompositeType.build(ByteBufferUtil.bytes("sc"), ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
 
@@ -329,16 +316,19 @@ public class CompactionsTest extends SchemaLoader
 
         Collection<SSTableReader> sstablesBefore = cfs.getSSTables();
 
-        QueryFilter filter = QueryFilter.getIdentityFilter(key, cfname);
-        assert !cfs.getColumnFamily(filter).isEmpty();
+        QueryFilter filter = QueryFilter.getIdentityFilter(key, cfname, System.currentTimeMillis());
+        assert !(cfs.getColumnFamily(filter).getColumnCount() == 0);
 
         // Remove key
-        rm = new RowMutation(TABLE1, key.key);
+        rm = new RowMutation(KEYSPACE1, key.key);
         rm.delete(cfname, 2);
         rm.apply();
 
         ColumnFamily cf = cfs.getColumnFamily(filter);
-        assert cf == null || cf.isEmpty() : "should be empty: " + cf;
+        assert cf == null || cf.getColumnCount() == 0 : "should be empty: " + cf;
+
+        // Sleep one second so that the removal is indeed purgeable even with gcgrace == 0
+        Thread.sleep(1000);
 
         cfs.forceBlockingFlush();
 
@@ -351,102 +341,6 @@ public class CompactionsTest extends SchemaLoader
         Util.compact(cfs, toCompact);
 
         cf = cfs.getColumnFamily(filter);
-        assert cf == null || cf.isEmpty() : "should be empty: " + cf;
-    }
-
-    public void testBlacklisting(String compactionStrategy) throws Exception
-    {
-        // this test does enough rows to force multiple block indexes to be used
-        Table table = Table.open(TABLE1);
-        final ColumnFamilyStore cfs = table.getColumnFamilyStore("Standard1");
-
-        final int ROWS_PER_SSTABLE = 10;
-        final int SSTABLES = cfs.metadata.getIndexInterval() * 2 / ROWS_PER_SSTABLE;
-
-        cfs.setCompactionStrategyClass(compactionStrategy);
-
-        // disable compaction while flushing
-        cfs.disableAutoCompaction();
-        //test index corruption
-        //now create a few new SSTables
-        long maxTimestampExpected = Long.MIN_VALUE;
-        Set<DecoratedKey> inserted = new HashSet<DecoratedKey>();
-        for (int j = 0; j < SSTABLES; j++)
-        {
-            for (int i = 0; i < ROWS_PER_SSTABLE; i++)
-            {
-                DecoratedKey key = Util.dk(String.valueOf(i % 2));
-                RowMutation rm = new RowMutation(TABLE1, key.key);
-                long timestamp = j * ROWS_PER_SSTABLE + i;
-                rm.add("Standard1", ByteBufferUtil.bytes(String.valueOf(i / 2)),
-                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
-                        timestamp);
-                maxTimestampExpected = Math.max(timestamp, maxTimestampExpected);
-                rm.apply();
-                inserted.add(key);
-            }
-            cfs.forceBlockingFlush();
-            assertMaxTimestamp(cfs, maxTimestampExpected);
-            assertEquals(inserted.toString(), inserted.size(), Util.getRangeSlice(cfs).size());
-        }
-
-        Collection<SSTableReader> sstables = cfs.getSSTables();
-        int currentSSTable = 0;
-        int sstablesToCorrupt = 8;
-
-        // corrupt first 'sstablesToCorrupt' SSTables
-        for (SSTableReader sstable : sstables)
-        {
-            if(currentSSTable + 1 > sstablesToCorrupt)
-                break;
-
-            RandomAccessFile raf = null;
-
-            try
-            {
-                raf = new RandomAccessFile(sstable.getFilename(), "rw");
-                assertNotNull(raf);
-                raf.write(0xFFFFFF);
-            }
-            finally
-            {
-                FileUtils.closeQuietly(raf);
-            }
-
-            currentSSTable++;
-        }
-
-        int failures = 0;
-
-        // close error output steam to avoid printing ton of useless RuntimeException
-        System.err.close();
-
-        try
-        {
-            // in case something will go wrong we don't want to loop forever using for (;;)
-            for (int i = 0; i < sstables.size(); i++)
-            {
-                try
-                {
-                    cfs.forceMajorCompaction();
-                }
-                catch (Exception e)
-                {
-                    failures++;
-                    continue;
-                }
-
-                assertEquals(sstablesToCorrupt + 1, cfs.getSSTables().size());
-                break;
-            }
-        }
-        finally
-        {
-            System.setErr(new PrintStream(new ByteArrayOutputStream()));
-        }
-
-
-        cfs.truncate();
-        assertEquals(failures, sstablesToCorrupt);
+        assert cf == null || cf.getColumnCount() == 0 : "should be empty: " + cf;
     }
 }

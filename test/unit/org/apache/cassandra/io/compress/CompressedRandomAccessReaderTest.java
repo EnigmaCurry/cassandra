@@ -23,6 +23,7 @@ import java.util.Random;
 
 import org.junit.Test;
 
+import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.SSTableMetadata;
 import org.apache.cassandra.io.util.*;
@@ -54,7 +55,7 @@ public class CompressedRandomAccessReaderTest
 
         try
         {
-            SSTableMetadata.Collector sstableMetadataCollector = SSTableMetadata.createCollector().replayPosition(null);
+            SSTableMetadata.Collector sstableMetadataCollector = SSTableMetadata.createCollector(BytesType.instance).replayPosition(null);
             SequentialWriter writer = compressed
                 ? new CompressedSequentialWriter(f, filename + ".metadata", false, new CompressionParameters(SnappyCompressor.instance), sstableMetadataCollector)
                 : new SequentialWriter(f, CompressionParameters.DEFAULT_CHUNK_LENGTH, false);
@@ -75,7 +76,7 @@ public class CompressedRandomAccessReaderTest
 
             assert f.exists();
             RandomAccessReader reader = compressed
-                                      ? CompressedRandomAccessReader.open(filename, new CompressionMetadata(filename + ".metadata", f.length()), false)
+                                      ? CompressedRandomAccessReader.open(filename, new CompressionMetadata(filename + ".metadata", f.length()))
                                       : RandomAccessReader.open(f);
             String expected = "The quick brown fox jumps over the lazy dog";
             assertEquals(expected.length(), reader.length());
@@ -105,7 +106,7 @@ public class CompressedRandomAccessReaderTest
         File metadata = new File(file.getPath() + ".meta");
         metadata.deleteOnExit();
 
-        SSTableMetadata.Collector sstableMetadataCollector = SSTableMetadata.createCollector().replayPosition(null);
+        SSTableMetadata.Collector sstableMetadataCollector = SSTableMetadata.createCollector(BytesType.instance).replayPosition(null);
         SequentialWriter writer = new CompressedSequentialWriter(file, metadata.getPath(), false, new CompressionParameters(SnappyCompressor.instance), sstableMetadataCollector);
 
         writer.write(CONTENT.getBytes());
@@ -115,7 +116,7 @@ public class CompressedRandomAccessReaderTest
         CompressionMetadata meta = new CompressionMetadata(metadata.getPath(), file.length());
         CompressionMetadata.Chunk chunk = meta.chunkFor(0);
 
-        RandomAccessReader reader = CompressedRandomAccessReader.open(file.getPath(), meta, false);
+        RandomAccessReader reader = CompressedRandomAccessReader.open(file.getPath(), meta);
         // read and verify compressed data
         assertEquals(CONTENT, reader.readLine());
         // close reader
@@ -142,7 +143,7 @@ public class CompressedRandomAccessReaderTest
                 checksumModifier.write(random.nextInt());
                 checksumModifier.getFD().sync(); // making sure that change was synced with disk
 
-                final RandomAccessReader r = CompressedRandomAccessReader.open(file.getPath(), meta, false);
+                final RandomAccessReader r = CompressedRandomAccessReader.open(file.getPath(), meta);
 
                 Throwable exception = null;
                 try
@@ -163,7 +164,7 @@ public class CompressedRandomAccessReaderTest
             // lets write original checksum and check if we can read data
             updateChecksum(checksumModifier, chunk.length, checksum);
 
-            reader = CompressedRandomAccessReader.open(file.getPath(), meta, false);
+            reader = CompressedRandomAccessReader.open(file.getPath(), meta);
             // read and verify compressed data
             assertEquals(CONTENT, reader.readLine());
             // close reader

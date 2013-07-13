@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.service.CassandraDaemon;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.server.TServer;
 import org.apache.thrift.transport.TFramedTransport;
 
@@ -90,7 +91,7 @@ public class ThriftServer implements CassandraDaemon.Server
             logger.info(String.format("Binding thrift service to %s:%s", listenAddr, listenPort));
 
             TServerFactory.Args args = new TServerFactory.Args();
-            args.tProtocolFactory = new TBinaryProtocol.Factory(true, true, DatabaseDescriptor.getThriftMaxMessageLength());
+            args.tProtocolFactory = new TBinaryProtocol.Factory(true, true);
             args.addr = new InetSocketAddress(listenAddr, listenPort);
             args.cassandraServer = new CassandraServer();
             args.processor = new Cassandra.Processor(args.cassandraServer);

@@ -23,16 +23,13 @@ package org.apache.cassandra.db.marshal;
 
 import com.google.common.base.Charsets;
 
-import org.apache.cassandra.cql.jdbc.*;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.serializers.*;
 import org.apache.cassandra.utils.Hex;
 import org.apache.cassandra.utils.UUIDGen;
 import org.junit.Test;
 
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
-import java.util.Calendar;
-import java.util.TimeZone;
 import java.util.UUID;
 
 public class RoundTripTest
@@ -46,7 +43,7 @@ public class RoundTripTest
         assert IntegerType.instance.fromString(IntegerType.instance.getString(ByteBuffer.wrap(bi.toByteArray())))
                 .equals(ByteBuffer.wrap(bi.toByteArray()));
         assert IntegerType.instance.compose(ByteBuffer.wrap(bi.toByteArray())).equals(bi);
-        assert JdbcInteger.instance.toString(bi).equals("1");
+        assert IntegerSerializer.instance.toString(bi).equals("1");
     }
 
     @Test
@@ -57,7 +54,7 @@ public class RoundTripTest
         assert LongType.instance.fromString(LongType.instance.getString(ByteBuffer.wrap(v)))
                 .equals(ByteBuffer.wrap(v));
         assert LongType.instance.compose(ByteBuffer.wrap(v)) == 1L;
-        assert JdbcLong.instance.toString(1L).equals("1");
+        assert LongSerializer.instance.toString(1L).equals("1");
     }
 
     @Test
@@ -68,7 +65,7 @@ public class RoundTripTest
         assert Int32Type.instance.fromString(Int32Type.instance.getString(ByteBuffer.wrap(v)))
                 .equals(ByteBuffer.wrap(v));
         assert Int32Type.instance.compose(ByteBuffer.wrap(v)) == 1;
-        // assert Int32Type.instance.toString(1).equals("1");
+        assert Int32Serializer.instance.toString(1).equals("1");
     }
 
     @Test
@@ -79,31 +76,25 @@ public class RoundTripTest
         assert AsciiType.instance.fromString(AsciiType.instance.getString(ByteBuffer.wrap(abc)))
                 .equals(ByteBuffer.wrap(abc));
         assert AsciiType.instance.compose(ByteBuffer.wrap(abc)).equals("abc");
-        assert JdbcAscii.instance.toString("abc").equals("abc");
+        assert AsciiSerializer.instance.toString("abc").equals("abc");
     }
 
     @Test
     public void testBytes()
     {
         byte[] v = new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-        assert JdbcBytes.instance.toString(BytesType.instance.fromString(Hex.bytesToHex(v)))
-                .equals(Hex.bytesToHex(v));
-        assert BytesType.instance.fromString(JdbcBytes.instance.toString(ByteBuffer.wrap(v)))
-                .equals(ByteBuffer.wrap(v));
         assert BytesType.instance.compose(ByteBuffer.wrap(v)).equals(ByteBuffer.wrap(v));
-        assert JdbcBytes.instance.toString(ByteBuffer.wrap(v)).equals(Hex.bytesToHex(v));
+        assert BytesSerializer.instance.toString(ByteBuffer.wrap(v)).equals(Hex.bytesToHex(v));
     }
 
     @Test
     public void testLexicalUUID()
     {
         UUID uuid = UUIDGen.getTimeUUID();
-        assert JdbcLexicalUUID.instance.getString(LexicalUUIDType.instance.fromString(uuid.toString()))
-                .equals(uuid.toString());
         assert LexicalUUIDType.instance.fromString(LexicalUUIDType.instance.getString(ByteBuffer.wrap(UUIDGen.decompose(uuid))))
                 .equals(ByteBuffer.wrap(UUIDGen.decompose(uuid)));
         assert LexicalUUIDType.instance.compose(ByteBuffer.wrap(UUIDGen.decompose(uuid))).equals(uuid);
-        assert JdbcLexicalUUID.instance.toString(uuid).equals(uuid.toString());
+        assert UUIDSerializer.instance.toString(uuid).equals(uuid.toString());
     }
 
     @Test
@@ -117,7 +108,7 @@ public class RoundTripTest
         assert TimeUUIDType.instance.compose(ByteBuffer.wrap(UUIDGen.decompose(uuid))).equals(uuid);
 
         assert uuid.equals(TimeUUIDType.instance.compose(TimeUUIDType.instance.fromString(uuid.toString())));
-        assert JdbcTimeUUID.instance.toString(uuid).equals(uuid.toString());
+        assert UUIDSerializer.instance.toString(uuid).equals(uuid.toString());
     }
 
     @Test
@@ -128,6 +119,6 @@ public class RoundTripTest
         assert UTF8Type.instance.fromString(UTF8Type.instance.getString(ByteBuffer.wrap(v.getBytes(Charsets.UTF_8))))
                 .equals(ByteBuffer.wrap(v.getBytes(Charsets.UTF_8)));
         assert UTF8Type.instance.compose(ByteBuffer.wrap(v.getBytes(Charsets.UTF_8))).equals(v);
-        assert JdbcUTF8.instance.toString(v).equals(v);
+        assert UTF8Serializer.instance.toString(v).equals(v);
     }
 }

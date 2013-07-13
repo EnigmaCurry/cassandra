@@ -63,15 +63,15 @@ public class KeyCollisionTest extends SchemaLoader
     @Test
     public void testGetSliceWithCollision() throws Exception
     {
-        Table table = Table.open(KEYSPACE);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CF);
+        Keyspace keyspace = Keyspace.open(KEYSPACE);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
         cfs.clearUnsafe();
 
         insert("k1", "k2", "k3");       // token = 2
         insert("key1", "key2", "key3"); // token = 4
         insert("longKey1", "longKey2"); // token = 8
 
-        List<Row> rows = cfs.getRangeSlice(new Bounds<RowPosition>(dk("k2"), dk("key2")), 10000, new IdentityQueryFilter(), null);
+        List<Row> rows = cfs.getRangeSlice(new Bounds<RowPosition>(dk("k2"), dk("key2")), null, new IdentityQueryFilter(), 10000);
         assert rows.size() == 4 : "Expecting 4 keys, got " + rows.size();
         assert rows.get(0).key.key.equals(ByteBufferUtil.bytes("k2"));
         assert rows.get(1).key.key.equals(ByteBufferUtil.bytes("k3"));
@@ -103,11 +103,6 @@ public class KeyCollisionTest extends SchemaLoader
         public DecoratedKey decorateKey(ByteBuffer key)
         {
             return new DecoratedKey(getToken(key), key);
-        }
-
-        public DecoratedKey convertFromDiskFormat(ByteBuffer fromdisk)
-        {
-            throw new UnsupportedOperationException();
         }
 
         public Token midpoint(Token ltoken, Token rtoken)
@@ -186,7 +181,7 @@ public class KeyCollisionTest extends SchemaLoader
                 lastToken = node;
             }
 
-            for (String ks : Schema.instance.getTables())
+            for (String ks : Schema.instance.getKeyspaces())
             {
                 for (CFMetaData cfmd : Schema.instance.getKSMetaData(ks).cfMetaData().values())
                 {

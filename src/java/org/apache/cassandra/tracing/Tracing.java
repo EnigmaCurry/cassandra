@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,12 +34,10 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.cql3.ColumnNameBuilder;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.ConsistencyLevel;
-import org.apache.cassandra.db.ExpiringColumn;
-import org.apache.cassandra.db.RowMutation;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
 import org.apache.cassandra.net.MessageIn;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -49,7 +48,7 @@ import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
 /**
  * A trace session context. Able to track and store trace sessions. A session is usually a user initiated query, and may
- * have multiple local and remote events before it is completed. All events and sessions are stored at table.
+ * have multiple local and remote events before it is completed. All events and sessions are stored at keyspace.
  */
 public class Tracing
 {
@@ -60,23 +59,15 @@ public class Tracing
 
     private static final int TTL = 24 * 3600;
 
-    private static Tracing instance = new Tracing();
+    private static final Logger logger = LoggerFactory.getLogger(Tracing.class);
 
-    public static final Logger logger = LoggerFactory.getLogger(Tracing.class);
-
-    /**
-     * Fetches and lazy initializes the trace context.
-     */
-    public static Tracing instance()
-    {
-        return instance;
-    }
-
-    private InetAddress localAddress = FBUtilities.getLocalAddress();
+    private final InetAddress localAddress = FBUtilities.getLocalAddress();
 
     private final ThreadLocal<TraceState> state = new ThreadLocal<TraceState>();
 
-    private final Map<UUID, TraceState> sessions = new ConcurrentHashMap<UUID, TraceState>();
+    private final ConcurrentMap<UUID, TraceState> sessions = new ConcurrentHashMap<UUID, TraceState>();
+
+    public static final Tracing instance = new Tracing();
 
     public static void addColumn(ColumnFamily cf, ByteBuffer name, InetAddress address)
     {
@@ -131,7 +122,7 @@ public class Tracing
      */
     public static boolean isTracing()
     {
-        return instance != null && instance.state.get() != null;
+        return instance.state.get() != null;
     }
 
     public UUID newSession()
@@ -143,17 +134,16 @@ public class Tracing
     {
         assert state.get() == null;
 
-        TraceState ts = new TraceState(localAddress, sessionId, true);
+        TraceState ts = new TraceState(localAddress, sessionId);
         state.set(ts);
         sessions.put(sessionId, ts);
 
         return sessionId;
     }
 
-    public void stopIfNonLocal(TraceState state)
+    public void stopNonLocal(TraceState state)
     {
-        if (!state.isLocallyOwned)
-            sessions.remove(state.sessionId);
+        sessions.remove(state.sessionId);
     }
 
     /**
@@ -176,10 +166,9 @@ public class Tracing
                 public void runMayThrow() throws Exception
                 {
                     CFMetaData cfMeta = CFMetaData.TraceSessionsCf;
-                    ColumnFamily cf = ColumnFamily.create(cfMeta);
+                    ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfMeta);
                     addColumn(cf, buildName(cfMeta, bytes("duration")), elapsed);
-                    RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes);
-                    mutation.add(cf);
+                    RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes, cf);
                     StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
                 }
             });
@@ -216,52 +205,51 @@ public class Tracing
             public void runMayThrow() throws Exception
             {
                 CFMetaData cfMeta = CFMetaData.TraceSessionsCf;
-                ColumnFamily cf = ColumnFamily.create(cfMeta);
+                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfMeta);
                 addColumn(cf, buildName(cfMeta, bytes("coordinator")), FBUtilities.getBroadcastAddress());
+                addParameterColumns(cf, parameters);
                 addColumn(cf, buildName(cfMeta, bytes("request")), request);
                 addColumn(cf, buildName(cfMeta, bytes("started_at")), started_at);
-                addParameterColumns(cf, parameters);
-                RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes);
-                mutation.add(cf);
+                RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes, cf);
                 StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
             }
         });
     }
 
     /**
-     * Updates the threads query context from a message
+     * Determines the tracing context from a message.  Does NOT set the threadlocal state.
      * 
-     * @param message
-     *            The internode message
+     * @param message The internode message
      */
-    public void initializeFromMessage(final MessageIn<?> message)
+    public TraceState initializeFromMessage(final MessageIn<?> message)
     {
         final byte[] sessionBytes = message.parameters.get(Tracing.TRACE_HEADER);
 
-        // if the message has no session context header don't do tracing
         if (sessionBytes == null)
-        {
-            state.set(null);
-            return;
-        }
+            return null;
 
         assert sessionBytes.length == 16;
         UUID sessionId = UUIDGen.getUUID(ByteBuffer.wrap(sessionBytes));
         TraceState ts = sessions.get(sessionId);
-        if (ts == null)
+        if (ts != null)
+            return ts;
+
+        if (message.verb == MessagingService.Verb.REQUEST_RESPONSE)
         {
-            ts = new TraceState(message.from, sessionId, false);
-            sessions.put(sessionId, ts);
+            // received a message for a session we've already closed out.  see CASSANDRA-5668
+            return new ExpiredTraceState(sessionId);
         }
-        state.set(ts);
+        else
+        {
+            ts = new TraceState(message.from, sessionId);
+            sessions.put(sessionId, ts);
+            return ts;
+        }
     }
 
     public static void trace(String message)
     {
-        if (Tracing.instance() == null) // instance might not be built at the time this is called
-            return;
-
-        final TraceState state = Tracing.instance().get();
+        final TraceState state = instance.get();
         if (state == null) // inline isTracing to avoid implicit two calls to state.get()
             return;
 
@@ -270,10 +258,7 @@ public class Tracing
 
     public static void trace(String format, Object arg)
     {
-        if (Tracing.instance() == null) // instance might not be built at the time this is called
-            return;
-
-        final TraceState state = Tracing.instance().get();
+        final TraceState state = instance.get();
         if (state == null) // inline isTracing to avoid implicit two calls to state.get()
             return;
 
@@ -282,10 +267,7 @@ public class Tracing
 
     public static void trace(String format, Object arg1, Object arg2)
     {
-        if (Tracing.instance() == null) // instance might not be built at the time this is called
-            return;
-
-        final TraceState state = Tracing.instance().get();
+        final TraceState state = instance.get();
         if (state == null) // inline isTracing to avoid implicit two calls to state.get()
             return;
 
@@ -294,10 +276,7 @@ public class Tracing
 
     public static void trace(String format, Object[] args)
     {
-        if (Tracing.instance() == null) // instance might not be built at the time this is called
-            return;
-
-        final TraceState state = Tracing.instance().get();
+        final TraceState state = instance.get();
         if (state == null) // inline isTracing to avoid implicit two calls to state.get()
             return;
 

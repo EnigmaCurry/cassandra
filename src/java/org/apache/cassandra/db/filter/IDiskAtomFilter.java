@@ -22,9 +22,9 @@ import java.io.DataOutput;
 import java.io.IOException;
 import java.util.Comparator;
 import java.util.Iterator;
+import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.columniterator.ISSTableColumnIterator;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.IVersionedSerializer;
@@ -41,10 +41,10 @@ import org.apache.cassandra.io.util.FileDataInput;
 public interface IDiskAtomFilter
 {
     /**
-     * returns an iterator that returns columns from the given memtable
+     * returns an iterator that returns columns from the given columnFamily
      * matching the Filter criteria in sorted order.
      */
-    public OnDiskAtomIterator getMemtableColumnIterator(ColumnFamily cf, DecoratedKey key);
+    public OnDiskAtomIterator getColumnFamilyIterator(DecoratedKey key, ColumnFamily cf);
 
     /**
      * Get an iterator that returns columns from the given SSTable using the opened file
@@ -53,64 +53,68 @@ public interface IDiskAtomFilter
      * @param file Already opened file data input, saves us opening another one
      * @param key The key of the row we are about to iterate over
      */
-    public ISSTableColumnIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, RowIndexEntry indexEntry);
+    public OnDiskAtomIterator getSSTableColumnIterator(SSTableReader sstable, FileDataInput file, DecoratedKey key, RowIndexEntry indexEntry);
 
     /**
      * returns an iterator that returns columns from the given SSTable
      * matching the Filter criteria in sorted order.
      */
-    public ISSTableColumnIterator getSSTableColumnIterator(SSTableReader sstable, DecoratedKey key);
+    public OnDiskAtomIterator getSSTableColumnIterator(SSTableReader sstable, DecoratedKey key);
 
     /**
      * collects columns from reducedColumns into returnCF.  Termination is determined
      * by the filter code, which should have some limit on the number of columns
      * to avoid running out of memory on large rows.
      */
-    public void collectReducedColumns(ColumnFamily container, Iterator<Column> reducedColumns, int gcBefore);
+    public void collectReducedColumns(ColumnFamily container, Iterator<Column> reducedColumns, int gcBefore, long now);
 
     public Comparator<Column> getColumnComparator(AbstractType<?> comparator);
 
     public boolean isReversed();
     public void updateColumnsLimit(int newLimit);
 
-    public int getLiveCount(ColumnFamily cf);
+    public int getLiveCount(ColumnFamily cf, long now);
+    public ColumnCounter columnCounter(AbstractType<?> comparator, long now);
 
     public IDiskAtomFilter cloneShallow();
+    public boolean maySelectPrefix(Comparator<ByteBuffer> cmp, ByteBuffer prefix);
+
+    boolean shouldInclude(SSTableReader sstable);
 
     public static class Serializer implements IVersionedSerializer<IDiskAtomFilter>
     {
         public static Serializer instance = new Serializer();
 
-        public void serialize(IDiskAtomFilter filter, DataOutput dos, int version) throws IOException
+        public void serialize(IDiskAtomFilter filter, DataOutput out, int version) throws IOException
         {
             if (filter instanceof SliceQueryFilter)
             {
-                dos.writeByte(0);
-                SliceQueryFilter.serializer.serialize((SliceQueryFilter)filter, dos, version);
+                out.writeByte(0);
+                SliceQueryFilter.serializer.serialize((SliceQueryFilter)filter, out, version);
             }
             else
             {
-                dos.writeByte(1);
-                NamesQueryFilter.serializer.serialize((NamesQueryFilter)filter, dos, version);
+                out.writeByte(1);
+                NamesQueryFilter.serializer.serialize((NamesQueryFilter)filter, out, version);
             }
         }
 
-        public IDiskAtomFilter deserialize(DataInput dis, int version) throws IOException
+        public IDiskAtomFilter deserialize(DataInput in, int version) throws IOException
         {
             throw new UnsupportedOperationException();
         }
 
-        public IDiskAtomFilter deserialize(DataInput dis, int version, AbstractType<?> comparator) throws IOException
+        public IDiskAtomFilter deserialize(DataInput in, int version, AbstractType<?> comparator) throws IOException
         {
-            int type = dis.readByte();
+            int type = in.readByte();
             if (type == 0)
             {
-                return SliceQueryFilter.serializer.deserialize(dis, version);
+                return SliceQueryFilter.serializer.deserialize(in, version);
             }
             else
             {
                 assert type == 1;
-                return NamesQueryFilter.serializer.deserialize(dis, version, comparator);
+                return NamesQueryFilter.serializer.deserialize(in, version, comparator);
             }
         }
 

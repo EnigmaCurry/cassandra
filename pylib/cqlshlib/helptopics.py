@@ -266,26 +266,6 @@ class CQLHelpTopics(object):
         """
     help_create_columnfamily_options = help_create_table_options
 
-    def help_alter(self):
-        print """
-        ALTER TABLE <tablename> ALTER <columnname> TYPE <type>;
-        ALTER TABLE <tablename> ADD <columnname> <type>;
-        ALTER TABLE <tablename> DROP <columnname>;
-        ALTER TABLE <tablename> WITH <optionname> = <val> [AND <optionname> = <val> [...]];
-
-        An ALTER statement is used to manipulate table metadata. It allows you
-        to add new typed columns, drop existing columns, change the data
-        storage type of existing columns, or change table properties.
-        No results are returned.
-
-        See one of the following for more information:
-
-          HELP ALTER_ALTER;
-          HELP ALTER_ADD;
-          HELP ALTER_DROP;
-          HELP ALTER_WITH;
-        """
-
     def help_alter_alter(self):
         print """
         ALTER TABLE: altering existing typed columns
@@ -456,251 +436,6 @@ class CQLHelpTopics(object):
         Limiting the number of rows returned can be achieved by adding the
         LIMIT option to a SELECT expression. LIMIT defaults to 10,000 when left
         unset.
-        """
-
-class CQL2HelpTopics(CQLHelpTopics):
-    def help_create_keyspace(self):
-        print """
-        CREATE KEYSPACE <ksname> WITH strategy_class = '<strategy>'
-                                 [AND strategy_options:<option> = <val>];
-
-        The CREATE KEYSPACE statement creates a new top-level namespace (aka
-        "keyspace"). Valid names are any string constructed of alphanumeric
-        characters and underscores. Names which do not work as valid
-        identifiers or integers should be quoted as string literals. Properties
-        such as replication strategy and count are specified during creation
-        using the following accepted keyword arguments:
-
-          strategy_class [required]: The name of the replication strategy class
-          which should be used for the new keyspace. Some often-used classes
-          are SimpleStrategy and NetworkTopologyStrategy.
-
-          strategy_options: Most strategies require additional arguments which
-          can be supplied by appending the option name to "strategy_options",
-          separated by a colon (:). For example, a strategy option of "DC1"
-          with a value of "1" would be specified as "strategy_options:DC1 = 1".
-          The replication factor option for SimpleStrategy could be
-          "strategy_options:replication_factor=3".
-        """
-
-    def help_begin(self):
-        print """
-        BEGIN BATCH [USING CONSISTENCY <level>
-                       [AND TIMESTAMP <timestamp>]]
-          <insert or update or delete statement> ;
-          [ <another insert or update or delete statement ;
-            [...]]
-        APPLY BATCH;
-
-        BATCH supports setting a client-supplied optional global timestamp
-        which will be used for each of the operations included in the batch.
-
-        A single consistency level is used for the entire batch. It appears
-        after the BEGIN BATCH statement, and uses the standard "consistency
-        level specification" (see HELP CONSISTENCYLEVEL). Batched statements
-        default to CONSISTENCY.ONE when left unspecified.
-
-        Only data modification statements (specifically, UPDATE, INSERT,
-        and DELETE) are allowed in a BATCH statement. BATCH is _not_ an
-        analogue for SQL transactions.
-
-        _NOTE: While there are no isolation guarantees, UPDATE queries are
-        atomic within a given record._
-        """
-    help_apply = help_begin
-
-    def help_select(self):
-        print """
-        SELECT [FIRST n] [REVERSED] <selectExpr>
-          FROM [<keyspace>.]<table>
-            [USING CONSISTENCY <consistencylevel>]
-            [WHERE <clause>]
-            [ORDER BY <colname> [DESC]]
-            [LIMIT m];
-
-        SELECT is used to read one or more records from a CQL table. It returns
-        a set of rows matching the selection criteria specified.
-
-        Note that FIRST and REVERSED are only supported in CQL 2, and ORDER BY
-        is only supported in CQL 3 and higher.
-
-        For more information, see one of the following:
-
-          HELP SELECT_EXPR
-          HELP SELECT_TABLE
-          HELP SELECT_WHERE
-          HELP SELECT_LIMIT
-          HELP CONSISTENCYLEVEL
-        """
-
-    def help_delete(self):
-        print """
-        DELETE [<col1> [, <col2>, ...] FROM [<keyspace>.]<tablename>
-               [USING CONSISTENCY <consistencylevel>
-                   [AND TIMESTAMP <timestamp>]]
-            WHERE <keyname> = <keyvalue>;
-
-        A DELETE is used to perform the removal of one or more columns from one
-        or more rows. Each DELETE statement requires a precise set of row keys
-        to be specified using a WHERE clause and the KEY keyword or key alias.
-
-        For more information, see one of the following:
-
-          HELP DELETE_USING
-          HELP DELETE_COLUMNS
-          HELP DELETE_WHERE
-          HELP CONSISTENCYLEVEL
-        """
-
-    def help_delete_using(self):
-        print """
-        DELETE: the USING clause
-
-          DELETE ... USING CONSISTENCY <consistencylevel>;
-          DELETE ... USING TIMESTAMP <timestamp>;
-
-        The USING clause allows setting of certain query and data parameters.
-        If multiple parameters need to be set, these may be joined using AND.
-        Example:
-
-          DELETE ... CONSISTENCY LOCAL_QUORUM AND TIMESTAMP 1318452291034;
-
-        <timestamp> defines the optional timestamp for the new tombstone
-        record. It must be an integer. Cassandra timestamps are generally
-        specified using milliseconds since the Unix epoch (1970-01-01 00:00:00
-        UTC).
-        """
-
-    def help_update(self):
-        print """
-        UPDATE [<keyspace>.]<columnFamily>
-                              [USING CONSISTENCY <consistencylevel>
-                                [AND TIMESTAMP <timestamp>]
-                                [AND TTL <timeToLive>]]
-               SET name1 = value1, name2 = value2 WHERE <keycol> = keyval;
-
-        An UPDATE is used to write one or more columns to a record in a table.
-        No results are returned. The record's primary key must be completely
-        and uniquely specified; that is, if the primary key includes multiple
-        columns, all must be explicitly given in the WHERE clause.
-
-        Statements begin with the UPDATE keyword followed by the name of the
-        table to be updated.
-
-        For more information, see one of the following:
-
-          HELP UPDATE_USING
-          HELP UPDATE_SET
-          HELP UPDATE_COUNTERS
-          HELP UPDATE_WHERE
-          HELP CONSISTENCYLEVEL
-        """
-
-    def help_update_using(self):
-        print """
-        UPDATE: the USING clause
-
-          UPDATE ... USING TIMESTAMP <timestamp>;
-          UPDATE ... USING TTL <timeToLive>;
-          UPDATE ... USING CONSISTENCY <consistencylevel>;
-
-        The USING clause allows setting of certain query and data parameters.
-        If multiple parameters need to be set, these may be joined using AND.
-        Example:
-
-          UPDATE ... USING TTL 43200 AND CONSISTENCY LOCAL_QUORUM;
-
-        <timestamp> defines the optional timestamp for the new column value(s).
-        It must be an integer. Cassandra timestamps are generally specified
-        using milliseconds since the Unix epoch (1970-01-01 00:00:00 UTC).
-
-        <timeToLive> defines the optional time to live (TTL) in seconds for the
-        new column value(s). It must be an integer.
-        """
-
-    def help_consistencylevel(self):
-        print """
-        Consistency Level Specification
-
-          ... USING CONSISTENCY <consistencylevel> ...
-
-        Consistency level specifications are made up of keyword USING,
-        followed by a consistency level identifier. Valid consistency level
-        identifiers are as follows:
-
-         * ANY
-         * ONE (default)
-         * TWO
-         * THREE
-         * QUORUM
-         * ALL
-         * LOCAL_QUORUM
-         * EACH_QUORUM
-
-        For more information on how consistency levels work, consult your
-        Cassandra documentation.
-        """
-
-    def help_insert(self):
-        print """
-        INSERT INTO [<keyspace>.]<tablename>
-                    ( <colname1>, <colname2> [, <colname3> [, ...]] )
-               VALUES ( <colval1>, <colval2> [, <colval3> [, ...]] )
-               [USING CONSISTENCY <consistencylevel>
-                 [AND TIMESTAMP <timestamp>]
-                 [AND TTL <timeToLive>]];
-
-        An INSERT is used to write one or more columns to a record in a
-        CQL table. No results are returned.
-
-        Values for all component columns in the table's primary key must
-        be given. Also, there must be at least one non-primary-key column
-        specified (Cassandra rows are not considered to exist with only
-        a key and no associated columns).
-
-        Unlike in SQL, the semantics of INSERT and UPDATE are identical.
-        In either case a record is created if none existed before, and
-        udpated when it does. For more information, see one of the
-        following:
-
-          HELP UPDATE
-          HELP UPDATE_USING
-          HELP CONSISTENCYLEVEL
-        """
-
-    def help_select_expr(self):
-        print """
-        SELECT: Specifying Columns
-
-          SELECT [FIRST n] [REVERSED] name1, name2, name3 FROM ...
-          SELECT [FIRST n] [REVERSED] name1..nameN FROM ...
-          SELECT COUNT(*) FROM ...
-
-        The SELECT expression determines which columns will appear in the
-        results and takes the form of either a comma separated list of names,
-        or a range. The range notation consists of a start and end column name
-        separated by two periods (..). The set of columns returned for a
-        range is start and end inclusive.
-
-        The FIRST option accepts an integer argument and can be used to apply a
-        limit to the number of columns returned per row.  When this limit is
-        left unset, it defaults to 10,000 columns.
-
-        The REVERSED option causes the sort order of the results to be
-        reversed.
-
-        It is worth noting that unlike the projection in a SQL SELECT, there is
-        no guarantee that the results will contain all of the columns
-        specified. This is because Cassandra is schema-less and there are no
-        guarantees that a given column exists.
-
-        When the COUNT aggregate function is specified as a column to fetch, a
-        single row will be returned, with a single column named "count" whose
-        value is the number of rows from the pre-aggregation resultset.
-
-        Currently, COUNT is the only function supported by CQL.
-
-         ** [FIRST n] and [REVERSED] are no longer supported in CQL 3.
         """
 
 class CQL3HelpTopics(CQLHelpTopics):
@@ -896,4 +631,175 @@ class CQL3HelpTopics(CQLHelpTopics):
         value is the number of rows from the pre-aggregation resultset.
 
         Currently, COUNT is the only function supported by CQL.
+        """
+
+    def help_alter_drop(self):
+        print """
+        ALTER TABLE: dropping a typed column
+
+          ALTER TABLE addamsFamily DROP gender;
+
+        An ALTER TABLE ... DROP statement removes the type of a column
+        from the column family metadata. Dropped columns will immediately
+        become unavailable in the queries and will not be included in
+        compacted sstables in the future. If a column is readded, queries
+        won't return values written before the column was last dropped.
+        It is assumed that timestamps represent actual time, so if this
+        is not your case, you should NOT readd previously dropped columns.
+        Columns can't be dropped from tables defined with COMPACT STORAGE.
+        """
+
+    def help_create(self):
+        super(CQL3HelpTopics, self).help_create()
+        print "          HELP CREATE_USER;\n"
+
+    def help_alter(self):
+        print """
+        ALTER TABLE <tablename> ALTER <columnname> TYPE <type>;
+        ALTER TABLE <tablename> ADD <columnname> <type>;
+        ALTER TABLE <tablename> RENAME <columnname> TO <columnname>
+            [AND <columnname> TO <columnname>]
+        ALTER TABLE <tablename> WITH <optionname> = <val> [AND <optionname> = <val> [...]];
+
+        An ALTER statement is used to manipulate table metadata. It allows you
+        to add new typed columns, drop existing columns, change the data
+        storage type of existing columns, or change table properties.
+        No results are returned.
+
+        See one of the following for more information:
+
+          HELP ALTER_ALTER;
+          HELP ALTER_ADD;
+          HELP ALTER_DROP;
+          HELP ALTER_RENAME;
+          HELP ALTER_WITH;
+        """
+
+    def help_alter_rename(self):
+        print """
+        ALTER TABLE: renaming a column
+
+          ALTER TABLE <tablename> RENAME <columnname> TO <columnname>
+              [AND <columnname> TO <columnname>]
+
+        The ALTER TABLE ... RENAME variant renames a typed column in a column
+        family.
+        """
+
+    def help_drop(self):
+        super(CQL3HelpTopics, self).help_drop()
+        print "          HELP DROP_USER;\n"
+
+    def help_list(self):
+        print """
+        There are different variants of LIST. For more information, see
+        one of the following:
+
+          HELP LIST_USERS;
+          HELP LIST_PERMISSIONS;
+        """
+
+    def help_create_user(self):
+        print """
+        CREATE USER <username> [WITH PASSWORD 'password'] [NOSUPERUSER | SUPERUSER];
+
+        CREATE USER creates a new Cassandra user account.
+        Only superusers can issue CREATE USER requests.
+        To create a superuser account use SUPERUSER option (NOSUPERUSER is the default).
+
+        WITH PASSWORD clause should only be used with password-based authenticators,
+        e.g. PasswordAuthenticator, SimpleAuthenticator.
+        """
+
+    def help_alter_user(self):
+        print """
+        ALTER USER <username> [WITH PASSWORD 'password'] [NOSUPERUSER | SUPERUSER];
+
+        Use ALTER USER to change a user's superuser status and/or password (only
+        with password-based authenticators).
+        Superusers can change a user's password or superuser status (except their own).
+        Users cannot change their own superuser status. Ordinary users can only change their
+        password (if the configured authenticator is password-based).
+        """
+
+    def help_drop_user(self):
+        print """
+        DROP USER <username>;
+
+        DROP USER removes an existing user. You have to be logged in as a superuser
+        to issue a DROP USER statement. A user cannot drop themselves.
+        """
+
+    def help_list_users(self):
+        print """
+        LIST USERS;
+
+        List existing users and their superuser status.
+        """
+
+    def help_grant(self):
+        print """
+        GRANT (<permission> [PERMISSION] | ALL [PERMISSIONS])
+                  ON ALL KEYSPACES
+                   | KEYSPACE <keyspace>
+                   | [TABLE] [<keyspace>.]<table>
+                  TO <username>
+
+        Grant the specified permission (or all permissions) on a resource
+        to a user.
+
+        To be able to grant a permission on some resource you have to
+        have that permission yourself and also AUTHORIZE permission on it,
+        or on one of its parent resources.
+
+        See HELP PERMISSIONS for more info on the available permissions.
+        """
+
+    def help_revoke(self):
+        print """
+        REVOKE (<permission> [PERMISSION] | ALL [PERMISSIONS])
+                  ON ALL KEYSPACES
+                   | KEYSPACE <keyspace>
+                   | [TABLE] [<keyspace>.]<table>
+                  FROM <username>
+
+        Revokes the specified permission (or all permissions) on a resource
+        from a user.
+
+        To be able to revoke a permission on some resource you have to
+        have that permission yourself and also AUTHORIZE permission on it,
+        or on one of its parent resources.
+
+        See HELP PERMISSIONS for more info on the available permissions.
+        """
+
+    def help_list_permissions(self):
+        print """
+        LIST (<permission> [PERMISSION] | ALL [PERMISSIONS])
+                  [ON ALL KEYSPACES
+                    | KEYSPACE <keyspace>
+                    | [TABLE] [<keyspace>.]<table>]
+                  [OF <username>]
+                  [NORECURSIVE]
+
+        Omitting ON <resource> part will list permissions on ALL KEYSPACES,
+        every keyspace and table.
+        Omitting OF <username> part will list permissions of all users.
+        Omitting NORECURSIVE specifier will list permissions of the resource
+        and all its parents (table, table's keyspace and ALL KEYSPACES).
+
+        See HELP PERMISSIONS for more info on the available permissions.
+        """
+
+    def help_permissions(self):
+        print """
+        PERMISSIONS
+
+        Cassandra has 6 permissions:
+          ALTER: required for ALTER KEYSPCE, ALTER TABLE, CREATE INDEX, DROP INDEX
+          AUTHORIZE: required for GRANT, REVOKE
+          CREATE: required for CREATE KEYSPACE, CREATE TABLE
+          DROP: required for DROP KEYSPACE, DROP TABLE
+          MODIFY: required for INSERT, DELETE, UPDATE, TRUNCATE
+          SELECT: required for SELECT
         """

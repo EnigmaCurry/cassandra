@@ -17,8 +17,8 @@
  */
 package org.apache.cassandra.service;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.ReadResponse;
@@ -27,9 +27,9 @@ import org.apache.cassandra.net.MessageIn;
 
 public class RowDigestResolver extends AbstractRowResolver
 {
-    public RowDigestResolver(String table, ByteBuffer key)
+    public RowDigestResolver(String keyspaceName, ByteBuffer key)
     {
-        super(key, table);
+        super(key, keyspaceName);
     }
 
     /**
@@ -56,12 +56,12 @@ public class RowDigestResolver extends AbstractRowResolver
      * b) we're checking additional digests that arrived after the minimum to handle
      *    the requested ConsistencyLevel, i.e. asynchronous read repair check
      */
-    public Row resolve() throws DigestMismatchException, IOException
+    public Row resolve() throws DigestMismatchException
     {
         if (logger.isDebugEnabled())
             logger.debug("resolving " + replies.size() + " responses");
 
-        long startTime = System.currentTimeMillis();
+        long start = System.nanoTime();
 
         // validate digests against each other; throw immediately on mismatch.
         // also extract the data reply, if any.
@@ -105,7 +105,7 @@ public class RowDigestResolver extends AbstractRowResolver
         }
 
         if (logger.isDebugEnabled())
-            logger.debug("resolve: " + (System.currentTimeMillis() - startTime) + " ms.");
+            logger.debug("resolve: {} ms.", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
         return new Row(key, data);
     }
 

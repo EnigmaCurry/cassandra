@@ -23,8 +23,8 @@ import java.security.MessageDigest;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.Allocator;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.HeapAllocator;
@@ -65,8 +65,11 @@ public class ExpiringColumn extends Column
     {
         if (localExpirationTime >= expireBefore || flag == ColumnSerializer.Flag.PRESERVE_SIZE)
             return new ExpiringColumn(name, value, timestamp, timeToLive, localExpirationTime);
-        // the column is now expired, we can safely return a simple tombstone
-        return new DeletedColumn(name, localExpirationTime, timestamp);
+        // The column is now expired, we can safely return a simple tombstone. Note that
+        // as long as the expiring column and the tombstone put together live longer than GC grace seconds,
+        // we'll fulfil our responsibility to repair.  See discussion at
+        // http://cassandra-user-incubator-apache-org.3065146.n2.nabble.com/repair-compaction-and-tombstone-rows-td7583481.html
+        return new DeletedColumn(name, localExpirationTime - timeToLive, timestamp);
     }
 
     public int getTimeToLive()
@@ -78,6 +81,12 @@ public class ExpiringColumn extends Column
     public Column withUpdatedName(ByteBuffer newName)
     {
         return new ExpiringColumn(newName, value, timestamp, timeToLive, localExpirationTime);
+    }
+
+    @Override
+    public Column withUpdatedTimestamp(long newTimestamp)
+    {
+        return new ExpiringColumn(name, value, newTimestamp, timeToLive, localExpirationTime);
     }
 
     @Override
@@ -149,16 +158,15 @@ public class ExpiringColumn extends Column
     }
 
     @Override
+    public boolean isMarkedForDelete(long now)
+    {
+        return (int) (now / 1000) >= getLocalDeletionTime();
+    }
+
+    @Override
     public long getMarkedForDeleteAt()
     {
-        if (isMarkedForDelete())
-        {
-            return timestamp;
-        }
-        else
-        {
-            throw new IllegalStateException("column is not marked for delete");
-        }
+        return timestamp;
     }
 
     @Override

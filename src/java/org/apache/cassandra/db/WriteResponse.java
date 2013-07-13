@@ -24,13 +24,9 @@ import java.io.IOException;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.ByteBufferUtil;
-
 
 /*
- * This message is sent back the row mutation verb handler
- * and basically specifies if the write succeeded or not for a particular
- * key in a table
+ * This empty response is sent by a replica to inform the coordinator that the write succeeded
  */
 public class WriteResponse
 {
@@ -43,32 +39,17 @@ public class WriteResponse
 
     public static class WriteResponseSerializer implements IVersionedSerializer<WriteResponse>
     {
-        public void serialize(WriteResponse wm, DataOutput dos, int version) throws IOException
+        public void serialize(WriteResponse wm, DataOutput out, int version) throws IOException
         {
-            if (version < MessagingService.VERSION_12)
-            {
-                dos.writeUTF("");
-                ByteBufferUtil.writeWithShortLength(ByteBufferUtil.EMPTY_BYTE_BUFFER, dos);
-                dos.writeBoolean(true);
-            }
         }
 
-        public WriteResponse deserialize(DataInput dis, int version) throws IOException
+        public WriteResponse deserialize(DataInput in, int version) throws IOException
         {
-            if (version < MessagingService.VERSION_12)
-            {
-                dis.readUTF();
-                ByteBufferUtil.readWithShortLength(dis);
-                dis.readBoolean();
-            }
             return new WriteResponse();
         }
 
         public long serializedSize(WriteResponse response, int version)
         {
-            TypeSizes sizes = TypeSizes.NATIVE;
-            if (version < MessagingService.VERSION_12)
-                return sizes.sizeof("") + sizes.sizeof((short) 0) + sizes.sizeof(true);
             return 0;
         }
     }

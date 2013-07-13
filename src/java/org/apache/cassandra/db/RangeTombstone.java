@@ -25,11 +25,10 @@ import java.security.MessageDigest;
 import java.util.*;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.io.ISSTableSerializer;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Interval;
 
@@ -95,7 +94,6 @@ public class RangeTombstone extends Interval<ByteBuffer, DeletionTime> implement
         try
         {
             buffer.writeLong(data.markedForDeleteAt);
-            buffer.writeInt(data.localDeletionTime);
         }
         catch (IOException e)
         {
@@ -239,11 +237,11 @@ public class RangeTombstone extends Interval<ByteBuffer, DeletionTime> implement
             }
         }
 
-        public boolean isDeleted(Column column)
+        public boolean isDeleted(Column column, long now)
         {
             for (RangeTombstone tombstone : ranges)
             {
-                if (comparator.compare(column.name(), tombstone.max) <= 0 && tombstone.data.isDeleted(column))
+                if (comparator.compare(column.name(), tombstone.max) <= 0 && tombstone.data.isDeleted(column, now))
                     return true;
             }
             return false;
@@ -252,32 +250,32 @@ public class RangeTombstone extends Interval<ByteBuffer, DeletionTime> implement
 
     public static class Serializer implements ISSTableSerializer<RangeTombstone>
     {
-        public void serializeForSSTable(RangeTombstone t, DataOutput dos) throws IOException
+        public void serializeForSSTable(RangeTombstone t, DataOutput out) throws IOException
         {
-            ByteBufferUtil.writeWithShortLength(t.min, dos);
-            dos.writeByte(ColumnSerializer.RANGE_TOMBSTONE_MASK);
-            ByteBufferUtil.writeWithShortLength(t.max, dos);
-            DeletionTime.serializer.serialize(t.data, dos);
+            ByteBufferUtil.writeWithShortLength(t.min, out);
+            out.writeByte(ColumnSerializer.RANGE_TOMBSTONE_MASK);
+            ByteBufferUtil.writeWithShortLength(t.max, out);
+            DeletionTime.serializer.serialize(t.data, out);
         }
 
-        public RangeTombstone deserializeFromSSTable(DataInput dis, Descriptor.Version version) throws IOException
+        public RangeTombstone deserializeFromSSTable(DataInput in, Descriptor.Version version) throws IOException
         {
-            ByteBuffer min = ByteBufferUtil.readWithShortLength(dis);
+            ByteBuffer min = ByteBufferUtil.readWithShortLength(in);
             if (min.remaining() <= 0)
-                throw ColumnSerializer.CorruptColumnException.create(dis, min);
+                throw ColumnSerializer.CorruptColumnException.create(in, min);
 
-            int b = dis.readUnsignedByte();
+            int b = in.readUnsignedByte();
             assert (b & ColumnSerializer.RANGE_TOMBSTONE_MASK) != 0;
-            return deserializeBody(dis, min, version);
+            return deserializeBody(in, min, version);
         }
 
-        public RangeTombstone deserializeBody(DataInput dis, ByteBuffer min, Descriptor.Version version) throws IOException
+        public RangeTombstone deserializeBody(DataInput in, ByteBuffer min, Descriptor.Version version) throws IOException
         {
-            ByteBuffer max = ByteBufferUtil.readWithShortLength(dis);
+            ByteBuffer max = ByteBufferUtil.readWithShortLength(in);
             if (max.remaining() <= 0)
-                throw ColumnSerializer.CorruptColumnException.create(dis, max);
+                throw ColumnSerializer.CorruptColumnException.create(in, max);
 
-            DeletionTime dt = DeletionTime.serializer.deserialize(dis);
+            DeletionTime dt = DeletionTime.serializer.deserialize(in);
             return new RangeTombstone(min, max, dt);
         }
     }

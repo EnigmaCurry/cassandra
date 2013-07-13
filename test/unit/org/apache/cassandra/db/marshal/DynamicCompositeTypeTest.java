@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import org.apache.cassandra.serializers.MarshalException;
 import org.junit.Test;
 import static org.junit.Assert.fail;
 
@@ -161,8 +162,8 @@ public class DynamicCompositeTypeTest extends SchemaLoader
     @Test
     public void testFullRound() throws Exception
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(cfName);
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         ByteBuffer cname1 = createDynamicCompositeKey("test1", null, -1, false);
         ByteBuffer cname2 = createDynamicCompositeKey("test1", uuids[0], 24, false);
@@ -179,7 +180,7 @@ public class DynamicCompositeTypeTest extends SchemaLoader
         addColumn(rm, cname3);
         rm.apply();
 
-        ColumnFamily cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(Util.dk("k"), cfName));
+        ColumnFamily cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(Util.dk("k"), cfName, System.currentTimeMillis()));
 
         Iterator<Column> iter = cf.getSortedColumns().iterator();
 

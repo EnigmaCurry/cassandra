@@ -26,19 +26,17 @@ import java.util.List;
 
 import com.google.common.collect.AbstractIterator;
 
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.OnDiskAtom;
-import org.apache.cassandra.db.RowIndexEntry;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.io.sstable.IndexHelper.IndexInfo;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileMark;
+import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
@@ -59,6 +57,9 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
     private final Deque<OnDiskAtom> blockColumns = new ArrayDeque<OnDiskAtom>();
     private final AbstractType<?> comparator;
 
+    // Holds range tombstone in reverse queries. See addColumn()
+    private final Deque<OnDiskAtom> rangeTombstonesReversed;
+
     /**
      * This slice reader assumes that slices are sorted correctly, e.g. that for forward lookup slices are in
      * lexicographic order of start elements and that for reverse lookup they are in reverse lexicographic order of
@@ -67,42 +68,29 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
      */
     public IndexedSliceReader(SSTableReader sstable, RowIndexEntry indexEntry, FileDataInput input, ColumnSlice[] slices, boolean reversed)
     {
+        Tracing.trace("Seeking to partition indexed section in data file");
         this.sstable = sstable;
         this.originalInput = input;
         this.reversed = reversed;
         this.slices = slices;
         this.comparator = sstable.metadata.comparator;
+        this.rangeTombstonesReversed = reversed ? new ArrayDeque<OnDiskAtom>() : null;
 
         try
         {
-            if (sstable.descriptor.version.hasPromotedIndexes)
+            Descriptor.Version version = sstable.descriptor.version;
+            this.indexes = indexEntry.columnsIndex();
+            emptyColumnFamily = EmptyColumns.factory.create(sstable.metadata);
+            if (indexes.isEmpty())
             {
-                this.indexes = indexEntry.columnsIndex();
-                if (indexes.isEmpty())
-                {
-                    setToRowStart(sstable, indexEntry, input);
-                    this.emptyColumnFamily = ColumnFamily.create(sstable.metadata);
-                    emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, sstable.descriptor.version));
-                    fetcher = new SimpleBlockFetcher();
-                }
-                else
-                {
-                    this.emptyColumnFamily = ColumnFamily.create(sstable.metadata);
-                    emptyColumnFamily.delete(indexEntry.deletionInfo());
-                    fetcher = new IndexedBlockFetcher(indexEntry.position);
-                }
+                setToRowStart(indexEntry, input);
+                emptyColumnFamily.delete(DeletionTime.serializer.deserialize(file));
+                fetcher = new SimpleBlockFetcher();
             }
             else
             {
-                setToRowStart(sstable, indexEntry, input);
-                IndexHelper.skipBloomFilter(file);
-                this.indexes = IndexHelper.deserializeIndex(file);
-                this.emptyColumnFamily = ColumnFamily.create(sstable.metadata);
-                emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, sstable.descriptor.version));
-                fetcher = indexes.isEmpty()
-                        ? new SimpleBlockFetcher()
-                        : new IndexedBlockFetcher(file.getFilePointer() + 4); // We still have the column count to
-                                                                              // skip to get the basePosition
+                emptyColumnFamily.delete(indexEntry.deletionTime());
+                fetcher = new IndexedBlockFetcher(indexEntry.position);
             }
         }
         catch (IOException e)
@@ -115,19 +103,20 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
     /**
      * Sets the seek position to the start of the row for column scanning.
      */
-    private void setToRowStart(SSTableReader reader, RowIndexEntry indexEntry, FileDataInput input) throws IOException
+    private void setToRowStart(RowIndexEntry rowEntry, FileDataInput in) throws IOException
     {
-        if (input == null)
+        if (in == null)
         {
-            this.file = sstable.getFileDataInput(indexEntry.position);
+            this.file = sstable.getFileDataInput(rowEntry.position);
         }
         else
         {
-            this.file = input;
-            input.seek(indexEntry.position);
+            this.file = in;
+            in.seek(rowEntry.position);
         }
-        sstable.decodeKey(ByteBufferUtil.readWithShortLength(file));
-        SSTableReader.readRowSize(file, sstable.descriptor);
+        sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(file));
+        if (sstable.descriptor.version.hasRowSizeAndColumnCount)
+            file.readLong();
     }
 
     public ColumnFamily getColumnFamily()
@@ -144,6 +133,14 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
     {
         while (true)
         {
+            if (reversed)
+            {
+                // Return all tombstone for the block first (see addColumn() below)
+                OnDiskAtom column = rangeTombstonesReversed.poll();
+                if (column != null)
+                    return column;
+            }
+
             OnDiskAtom column = blockColumns.poll();
             if (column == null)
             {
@@ -166,9 +163,22 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
     protected void addColumn(OnDiskAtom col)
     {
         if (reversed)
-            blockColumns.addFirst(col);
+        {
+            /*
+             * We put range tomstone markers at the beginning of the range they delete. But for reversed queries,
+             * the caller still need to know about a RangeTombstone before it sees any column that it covers.
+             * To make that simple, we keep said tombstones separate and return them all before any column for
+             * a given block.
+             */
+            if (col instanceof RangeTombstone)
+                rangeTombstonesReversed.addFirst(col);
+            else
+                blockColumns.addFirst(col);
+        }
         else
+        {
             blockColumns.addLast(col);
+        }
     }
 
     private abstract class BlockFetcher
@@ -227,7 +237,7 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
     private class IndexedBlockFetcher extends BlockFetcher
     {
         // where this row starts
-        private final long basePosition;
+        private final long columnsStart;
 
         // the index entry for the next block to deserialize
         private int nextIndexIdx = -1;
@@ -239,10 +249,10 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
         // may still match a slice
         private final Deque<OnDiskAtom> prefetched;
 
-        public IndexedBlockFetcher(long basePosition)
+        public IndexedBlockFetcher(long columnsStart)
         {
             super(-1);
-            this.basePosition = basePosition;
+            this.columnsStart = columnsStart;
             this.prefetched = reversed ? new ArrayDeque<OnDiskAtom>() : null;
             setNextSlice();
         }
@@ -347,7 +357,7 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
             IndexInfo currentIndex = indexes.get(lastDeserializedBlock);
 
             /* seek to the correct offset to the data, and calculate the data size */
-            long positionToSeek = basePosition + currentIndex.offset;
+            long positionToSeek = columnsStart + currentIndex.offset;
 
             // With new promoted indexes, our first seek in the data file will happen at that point.
             if (file == null)
@@ -437,7 +447,8 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
             // We remenber when we are whithin a slice to avoid some comparison
             boolean inSlice = false;
 
-            Iterator<OnDiskAtom> atomIterator = emptyColumnFamily.metadata().getOnDiskIterator(file, file.readInt(), sstable.descriptor.version);
+            int columnCount = sstable.descriptor.version.hasRowSizeAndColumnCount ? file.readInt() : Integer.MAX_VALUE;
+            Iterator<OnDiskAtom> atomIterator = emptyColumnFamily.metadata().getOnDiskIterator(file, columnCount, sstable.descriptor.version);
             while (atomIterator.hasNext())
             {
                 OnDiskAtom column = atomIterator.next();

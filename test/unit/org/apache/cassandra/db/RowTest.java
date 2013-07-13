@@ -19,15 +19,16 @@
 package org.apache.cassandra.db;
 
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.SchemaLoader;
 import org.junit.Test;
 
 import static junit.framework.Assert.assertEquals;
-import static junit.framework.Assert.fail;
-import org.apache.cassandra.db.marshal.AsciiType;
 import static org.apache.cassandra.Util.column;
 import org.apache.cassandra.utils.ByteBufferUtil;
+
+import com.google.common.util.concurrent.Uninterruptibles;
 
 
 public class RowTest extends SchemaLoader
@@ -35,10 +36,10 @@ public class RowTest extends SchemaLoader
     @Test
     public void testDiffColumnFamily()
     {
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.addColumn(column("one", "onev", 0));
 
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         DeletionInfo delInfo = new DeletionInfo(0, 0);
         cf2.delete(delInfo);
 
@@ -50,10 +51,10 @@ public class RowTest extends SchemaLoader
     @Test
     public void testResolve()
     {
-        ColumnFamily cf1 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf1 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf1.addColumn(column("one", "A", 0));
 
-        ColumnFamily cf2 = ColumnFamily.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = TreeMapBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         cf2.addColumn(column("one", "B", 1));
         cf2.addColumn(column("two", "C", 1));
 
@@ -66,19 +67,12 @@ public class RowTest extends SchemaLoader
     public void testExpiringColumnExpiration()
     {
         Column c = new ExpiringColumn(ByteBufferUtil.bytes("one"), ByteBufferUtil.bytes("A"), 0, 1);
-        assert !c.isMarkedForDelete();
+        assert !c.isMarkedForDelete(System.currentTimeMillis());
 
-        try
-        {
-            // Because we keep the local deletion time with a precision of a
-            // second, we could have to wait 2 seconds in worst case scenario.
-            Thread.sleep(2000);
-        }
-        catch (InterruptedException e)
-        {
-            fail("Cannot test column expiration if you wake me up too early");
-        }
+        // Because we keep the local deletion time with a precision of a
+        // second, we could have to wait 2 seconds in worst case scenario.
+        Uninterruptibles.sleepUninterruptibly(2, TimeUnit.SECONDS);
 
-        assert c.isMarkedForDelete() && c.getMarkedForDeleteAt() == 0;
+        assert c.isMarkedForDelete(System.currentTimeMillis()) && c.getMarkedForDeleteAt() == 0;
     }
 }

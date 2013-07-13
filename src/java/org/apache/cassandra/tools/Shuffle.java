@@ -43,7 +43,7 @@ import javax.management.MBeanServerConnection;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
-import org.apache.cassandra.cql.jdbc.JdbcDate;
+import org.apache.cassandra.serializers.TimestampSerializer;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.EndpointSnitchInfoMBean;
@@ -233,7 +233,7 @@ public class Shuffle extends AbstractJmxClient
         {
             try
             {
-                JMXConnection conn = new JMXConnection(endpoint, port);
+                JMXConnection conn = new JMXConnection(endpoint, port, username, password);
                 getSSProxy(conn.getMbeanServerConn()).enableScheduledRangeXfers();
                 conn.close();
             }
@@ -265,7 +265,7 @@ public class Shuffle extends AbstractJmxClient
         {
             try
             {
-                JMXConnection conn = new JMXConnection(endpoint, port);
+                JMXConnection conn = new JMXConnection(endpoint, port, username, password);
                 getSSProxy(conn.getMbeanServerConn()).disableScheduledRangeXfers();
                 conn.close();
             }
@@ -286,7 +286,7 @@ public class Shuffle extends AbstractJmxClient
     {
         try
         {
-            JMXConnection conn = new JMXConnection(host, port);
+            JMXConnection conn = new JMXConnection(host, port, username, password);
             return getSSProxy(conn.getMbeanServerConn()).getLiveNodes();
         }
         catch (IOException e)
@@ -389,7 +389,7 @@ public class Shuffle extends AbstractJmxClient
 
                 ByteBuffer tokenBytes = ByteBuffer.wrap(row.getColumns().get(0).getValue());
                 ByteBuffer requestedAt = ByteBuffer.wrap(row.getColumns().get(1).getValue());
-                Date time = JdbcDate.instance.compose(requestedAt);
+                Date time = TimestampSerializer.instance.deserialize(requestedAt);
                 Token<?> token = partitioner.getTokenFactory().fromByteArray(tokenBytes);
 
                 writeln("%-42s %-15s %s", token.toString(), host, time.toString());
@@ -580,7 +580,7 @@ public class Shuffle extends AbstractJmxClient
             Token<?> token = partitioner.getTokenFactory().fromString(tokenStr);
             String hexToken = ByteBufferUtil.bytesToHex(partitioner.getTokenFactory().toByteArray(token));
             query.append("INSERT INTO system.range_xfers (token_bytes, requested_at) ")
-                 .append("VALUES ('").append(hexToken).append("', 'now');").append("\n");
+                 .append("VALUES (").append("0x").append(hexToken).append(", 'now');").append("\n");
         }
 
         query.append("APPLY BATCH").append("\n");
@@ -631,6 +631,8 @@ public class Shuffle extends AbstractJmxClient
 
         String hostName = (cmd.getOptionValue("host") != null) ? cmd.getOptionValue("host") : DEFAULT_HOST;
         String port = (cmd.getOptionValue("port") != null) ? cmd.getOptionValue("port") : Integer.toString(DEFAULT_JMX_PORT);
+        String username = cmd.getOptionValue("username");
+        String password = cmd.getOptionValue("password");
         String thriftHost = (cmd.getOptionValue("thrift-host") != null) ? cmd.getOptionValue("thrift-host") : hostName;
         String thriftPort = (cmd.getOptionValue("thrift-port") != null) ? cmd.getOptionValue("thrift-port") : "9160";
         String onlyDc = cmd.getOptionValue("only-dc");
@@ -670,7 +672,8 @@ public class Shuffle extends AbstractJmxClient
         else
             thriftPortNum = 9160;
 
-        Shuffle shuffler = new Shuffle(hostName, portNum, thriftHost, thriftPortNum, thriftFramed, null, null);
+        Shuffle shuffler = new Shuffle(hostName, portNum, thriftHost, thriftPortNum, thriftFramed,
+                username, password);
 
         try
         {
@@ -680,7 +683,7 @@ public class Shuffle extends AbstractJmxClient
                 shuffler.ls();
             else if (subCommand.startsWith("en"))
                 shuffler.enable();
-            else if (subCommand.startsWith("dis"))
+            else if (subCommand.startsWith("in"))
                 shuffler.disable();
             else if (subCommand.equals("clear"))
                 shuffler.clear();

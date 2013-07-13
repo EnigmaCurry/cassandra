@@ -41,21 +41,19 @@ public class SimpleCondition implements Condition
 
     public synchronized boolean await(long time, TimeUnit unit) throws InterruptedException
     {
-        // micro/nanoseconds not supported
-        assert unit == TimeUnit.DAYS || unit == TimeUnit.HOURS || unit == TimeUnit.MINUTES || unit == TimeUnit.SECONDS || unit == TimeUnit.MILLISECONDS;
-
-        long end = System.currentTimeMillis() + unit.convert(time, TimeUnit.MILLISECONDS);
-        while (!set && end > System.currentTimeMillis())
+        long start = System.nanoTime();
+        long timeout = unit.toNanos(time);
+        long elapsed;
+        while (!set && (elapsed = System.nanoTime() - start) < timeout)
         {
-            TimeUnit.MILLISECONDS.timedWait(this, end - System.currentTimeMillis());
+            TimeUnit.NANOSECONDS.timedWait(this, timeout - elapsed);
         }
         return set;
     }
 
-    public synchronized void signal()
+    public void signal()
     {
-        set = true;
-        notify();
+        throw new UnsupportedOperationException();
     }
 
     public synchronized void signalAll()

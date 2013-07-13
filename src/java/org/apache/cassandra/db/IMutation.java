@@ -23,10 +23,11 @@ import java.util.UUID;
 
 public interface IMutation
 {
-    public String getTable();
+    public String getKeyspaceName();
     public Collection<UUID> getColumnFamilyIds();
     public ByteBuffer key();
     public void apply();
     public String toString(boolean shallow);
     public void addAll(IMutation m);
+    public Collection<ColumnFamily> getColumnFamilies();
 }

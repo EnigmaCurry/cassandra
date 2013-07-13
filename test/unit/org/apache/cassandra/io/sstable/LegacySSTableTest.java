@@ -33,8 +33,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 /**
- * Tests backwards compatibility for SSTables. Requires that older SSTables match up with the existing config file,
- * and currently only tests specific cases for specific upgrades.
+ * Tests backwards compatibility for SSTables
  */
 public class LegacySSTableTest extends SchemaLoader
 {
@@ -75,7 +74,7 @@ public class LegacySSTableTest extends SchemaLoader
     public void buildTestSSTable() throws IOException
     {
         // write the output in a version specific directory
-        Descriptor dest = getDescriptor(Descriptor.CURRENT_VERSION);
+        Descriptor dest = getDescriptor(Descriptor.Version.current_version);
         assert dest.directory.mkdirs() : "Could not create " + dest.directory + ". Might it already exist?";
 
         SSTableReader ssTable = SSTableUtils.prepare().ks(KSNAME).cf(CFNAME).dest(dest).write(TEST_DATA);
@@ -106,6 +105,8 @@ public class LegacySSTableTest extends SchemaLoader
                 SSTableNamesIterator iter = new SSTableNamesIterator(reader, dk, FBUtilities.singleton(key));
                 assert iter.next().name().equals(key);
             }
+
+            // TODO actually test some reads
         }
         catch (Throwable e)
         {

@@ -18,8 +18,12 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.util.*;
 
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.StreamingHistogram;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +39,8 @@ import org.apache.cassandra.utils.EstimatedHistogram;
  *  - estimated column count histogram
  *  - replay position
  *  - max column timestamp
+ *  - max local deletion time
+ *  - bloom filter fp chance
  *  - compression ratio
  *  - partitioner
  *  - generations of sstables from which this sstable was compacted, if any
@@ -45,6 +51,7 @@ import org.apache.cassandra.utils.EstimatedHistogram;
  */
 public class SSTableMetadata
 {
+    public static final double NO_BLOOM_FLITER_FP_CHANCE = -1.0;
     public static final double NO_COMPRESSION_RATIO = -1.0;
     public static final SSTableMetadataSerializer serializer = new SSTableMetadataSerializer();
 
@@ -53,46 +60,110 @@ public class SSTableMetadata
     public final ReplayPosition replayPosition;
     public final long minTimestamp;
     public final long maxTimestamp;
+    public final int maxLocalDeletionTime;
+    public final double bloomFilterFPChance;
     public final double compressionRatio;
     public final String partitioner;
-    public final Set<Integer> ancestors;
     public final StreamingHistogram estimatedTombstoneDropTime;
+    public final int sstableLevel;
+    public final List<ByteBuffer> maxColumnNames;
+    public final List<ByteBuffer> minColumnNames;
 
     private SSTableMetadata()
     {
         this(defaultRowSizeHistogram(),
              defaultColumnCountHistogram(),
              ReplayPosition.NONE,
-             Long.MAX_VALUE,
              Long.MIN_VALUE,
+             Long.MAX_VALUE,
+             Integer.MAX_VALUE,
+             NO_BLOOM_FLITER_FP_CHANCE,
              NO_COMPRESSION_RATIO,
              null,
-             Collections.<Integer>emptySet(),
-             defaultTombstoneDropTimeHistogram());
+             defaultTombstoneDropTimeHistogram(),
+             0,
+             Collections.<ByteBuffer>emptyList(),
+             Collections.<ByteBuffer>emptyList());
     }
 
-    private SSTableMetadata(EstimatedHistogram rowSizes, EstimatedHistogram columnCounts, ReplayPosition replayPosition, long minTimestamp,
-            long maxTimestamp, double cr, String partitioner, Set<Integer> ancestors, StreamingHistogram estimatedTombstoneDropTime)
+    private SSTableMetadata(EstimatedHistogram rowSizes,
+                            EstimatedHistogram columnCounts,
+                            ReplayPosition replayPosition,
+                            long minTimestamp,
+                            long maxTimestamp,
+                            int maxLocalDeletionTime,
+                            double bloomFilterFPChance,
+                            double compressionRatio,
+                            String partitioner,
+                            StreamingHistogram estimatedTombstoneDropTime,
+                            int sstableLevel,
+                            List<ByteBuffer> minColumnNames,
+                            List<ByteBuffer> maxColumnNames)
     {
         this.estimatedRowSize = rowSizes;
         this.estimatedColumnCount = columnCounts;
         this.replayPosition = replayPosition;
         this.minTimestamp = minTimestamp;
         this.maxTimestamp = maxTimestamp;
-        this.compressionRatio = cr;
+        this.maxLocalDeletionTime = maxLocalDeletionTime;
+        this.bloomFilterFPChance = bloomFilterFPChance;
+        this.compressionRatio = compressionRatio;
         this.partitioner = partitioner;
-        this.ancestors = ancestors;
         this.estimatedTombstoneDropTime = estimatedTombstoneDropTime;
+        this.sstableLevel = sstableLevel;
+        this.minColumnNames = minColumnNames;
+        this.maxColumnNames = maxColumnNames;
     }
 
-    public static SSTableMetadata createDefaultInstance()
+    public static Collector createCollector(AbstractType<?> columnNameComparator)
     {
-        return new SSTableMetadata();
+        return new Collector(columnNameComparator);
     }
 
-    public static Collector createCollector()
+    public static Collector createCollector(Collection<SSTableReader> sstables, AbstractType<?> columnNameComparator, int level)
     {
-        return new Collector();
+        Collector collector = new Collector(columnNameComparator);
+
+        collector.replayPosition(ReplayPosition.getReplayPosition(sstables));
+        collector.sstableLevel(level);
+        // Get the max timestamp of the precompacted sstables
+        // and adds generation of live ancestors
+        for (SSTableReader sstable : sstables)
+        {
+            collector.addAncestor(sstable.descriptor.generation);
+            for (Integer i : sstable.getAncestors())
+            {
+                if (new File(sstable.descriptor.withGeneration(i).filenameFor(Component.DATA)).exists())
+                    collector.addAncestor(i);
+            }
+        }
+
+        return collector;
+    }
+
+    /**
+     * Used when updating sstablemetadata files with an sstable level
+     * @param metadata
+     * @param sstableLevel
+     * @return
+     */
+    @Deprecated
+    public static SSTableMetadata copyWithNewSSTableLevel(SSTableMetadata metadata, int sstableLevel)
+    {
+        return new SSTableMetadata(metadata.estimatedRowSize,
+                                   metadata.estimatedColumnCount,
+                                   metadata.replayPosition,
+                                   metadata.minTimestamp,
+                                   metadata.maxTimestamp,
+                                   metadata.maxLocalDeletionTime,
+                                   metadata.bloomFilterFPChance,
+                                   metadata.compressionRatio,
+                                   metadata.partitioner,
+                                   metadata.estimatedTombstoneDropTime,
+                                   sstableLevel,
+                                   metadata.minColumnNames,
+                                   metadata.maxColumnNames);
+
     }
 
     static EstimatedHistogram defaultColumnCountHistogram()
@@ -144,10 +215,19 @@ public class SSTableMetadata
         protected ReplayPosition replayPosition = ReplayPosition.NONE;
         protected long minTimestamp = Long.MAX_VALUE;
         protected long maxTimestamp = Long.MIN_VALUE;
+        protected int maxLocalDeletionTime = Integer.MIN_VALUE;
         protected double compressionRatio = NO_COMPRESSION_RATIO;
         protected Set<Integer> ancestors = new HashSet<Integer>();
         protected StreamingHistogram estimatedTombstoneDropTime = defaultTombstoneDropTimeHistogram();
+        protected int sstableLevel;
+        protected List<ByteBuffer> minColumnNames = Collections.emptyList();
+        protected List<ByteBuffer> maxColumnNames = Collections.emptyList();
+        private final AbstractType<?> columnNameComparator;
 
+        private Collector(AbstractType<?> columnNameComparator)
+        {
+            this.columnNameComparator = columnNameComparator;
+        }
         public void addRowSize(long rowSize)
         {
             estimatedRowSize.add(rowSize);
@@ -182,17 +262,26 @@ public class SSTableMetadata
             maxTimestamp = Math.max(maxTimestamp, potentialMax);
         }
 
-        public SSTableMetadata finalizeMetadata(String partitioner)
+        public void updateMaxLocalDeletionTime(int maxLocalDeletionTime)
+        {
+            this.maxLocalDeletionTime = Math.max(this.maxLocalDeletionTime, maxLocalDeletionTime);
+        }
+
+        public SSTableMetadata finalizeMetadata(String partitioner, double bloomFilterFPChance)
         {
             return new SSTableMetadata(estimatedRowSize,
                                        estimatedColumnCount,
                                        replayPosition,
                                        minTimestamp,
                                        maxTimestamp,
+                                       maxLocalDeletionTime,
+                                       bloomFilterFPChance,
                                        compressionRatio,
                                        partitioner,
-                                       ancestors,
-                                       estimatedTombstoneDropTime);
+                                       estimatedTombstoneDropTime,
+                                       sstableLevel,
+                                       minColumnNames,
+                                       maxColumnNames);
         }
 
         public Collector estimatedRowSize(EstimatedHistogram estimatedRowSize)
@@ -230,9 +319,32 @@ public class SSTableMetadata
              * that in this case we will not use EchoedRow, since CompactionControler.needsDeserialize() will be true).
             */
             updateMaxTimestamp(stats.maxTimestamp);
+            updateMaxLocalDeletionTime(stats.maxLocalDeletionTime);
             addRowSize(size);
             addColumnCount(stats.columnCount);
             mergeTombstoneHistogram(stats.tombstoneHistogram);
+            updateMinColumnNames(stats.minColumnNames);
+            updateMaxColumnNames(stats.maxColumnNames);
+        }
+
+        public Collector sstableLevel(int sstableLevel)
+        {
+            this.sstableLevel = sstableLevel;
+            return this;
+        }
+
+        public Collector updateMinColumnNames(List<ByteBuffer> minColumnNames)
+        {
+            if (minColumnNames.size() > 0)
+                this.minColumnNames = ColumnNameHelper.mergeMin(this.minColumnNames, minColumnNames, columnNameComparator);
+            return this;
+        }
+
+        public Collector updateMaxColumnNames(List<ByteBuffer> maxColumnNames)
+        {
+            if (maxColumnNames.size() > 0)
+                this.maxColumnNames = ColumnNameHelper.mergeMax(this.maxColumnNames, maxColumnNames, columnNameComparator);
+            return this;
         }
     }
 
@@ -240,75 +352,167 @@ public class SSTableMetadata
     {
         private static final Logger logger = LoggerFactory.getLogger(SSTableMetadataSerializer.class);
 
-        public void serialize(SSTableMetadata sstableStats, DataOutput dos) throws IOException
+        public void serialize(SSTableMetadata sstableStats, Set<Integer> ancestors, DataOutput out) throws IOException
         {
             assert sstableStats.partitioner != null;
 
-            EstimatedHistogram.serializer.serialize(sstableStats.estimatedRowSize, dos);
-            EstimatedHistogram.serializer.serialize(sstableStats.estimatedColumnCount, dos);
-            ReplayPosition.serializer.serialize(sstableStats.replayPosition, dos);
-            dos.writeLong(sstableStats.minTimestamp);
-            dos.writeLong(sstableStats.maxTimestamp);
-            dos.writeDouble(sstableStats.compressionRatio);
-            dos.writeUTF(sstableStats.partitioner);
-            dos.writeInt(sstableStats.ancestors.size());
-            for (Integer g : sstableStats.ancestors)
-                dos.writeInt(g);
-            StreamingHistogram.serializer.serialize(sstableStats.estimatedTombstoneDropTime, dos);
+            EstimatedHistogram.serializer.serialize(sstableStats.estimatedRowSize, out);
+            EstimatedHistogram.serializer.serialize(sstableStats.estimatedColumnCount, out);
+            ReplayPosition.serializer.serialize(sstableStats.replayPosition, out);
+            out.writeLong(sstableStats.minTimestamp);
+            out.writeLong(sstableStats.maxTimestamp);
+            out.writeInt(sstableStats.maxLocalDeletionTime);
+            out.writeDouble(sstableStats.bloomFilterFPChance);
+            out.writeDouble(sstableStats.compressionRatio);
+            out.writeUTF(sstableStats.partitioner);
+            out.writeInt(ancestors.size());
+            for (Integer g : ancestors)
+                out.writeInt(g);
+            StreamingHistogram.serializer.serialize(sstableStats.estimatedTombstoneDropTime, out);
+            out.writeInt(sstableStats.sstableLevel);
+            serializeMinMaxColumnNames(sstableStats.minColumnNames, sstableStats.maxColumnNames, out);
         }
 
-        public SSTableMetadata deserialize(Descriptor descriptor) throws IOException
+        private void serializeMinMaxColumnNames(List<ByteBuffer> minColNames, List<ByteBuffer> maxColNames, DataOutput out) throws IOException
+        {
+            out.writeInt(minColNames.size());
+            for (ByteBuffer columnName : minColNames)
+                ByteBufferUtil.writeWithShortLength(columnName, out);
+            out.writeInt(maxColNames.size());
+            for (ByteBuffer columnName : maxColNames)
+                ByteBufferUtil.writeWithShortLength(columnName, out);
+        }
+        /**
+         * Used to serialize to an old version - needed to be able to update sstable level without a full compaction.
+         *
+         * @deprecated will be removed when it is assumed that the minimum upgrade-from-version is the version that this
+         * patch made it into
+         *
+         * @param sstableStats
+         * @param legacyDesc
+         * @param out
+         * @throws IOException
+         */
+        @Deprecated
+        public void legacySerialize(SSTableMetadata sstableStats, Set<Integer> ancestors, Descriptor legacyDesc, DataOutput out) throws IOException
+        {
+            EstimatedHistogram.serializer.serialize(sstableStats.estimatedRowSize, out);
+            EstimatedHistogram.serializer.serialize(sstableStats.estimatedColumnCount, out);
+            ReplayPosition.serializer.serialize(sstableStats.replayPosition, out);
+            out.writeLong(sstableStats.minTimestamp);
+            out.writeLong(sstableStats.maxTimestamp);
+            if (legacyDesc.version.tracksMaxLocalDeletionTime)
+                out.writeInt(sstableStats.maxLocalDeletionTime);
+            if (legacyDesc.version.hasBloomFilterFPChance)
+                out.writeDouble(sstableStats.bloomFilterFPChance);
+            out.writeDouble(sstableStats.compressionRatio);
+            out.writeUTF(sstableStats.partitioner);
+            out.writeInt(ancestors.size());
+            for (Integer g : ancestors)
+                out.writeInt(g);
+            StreamingHistogram.serializer.serialize(sstableStats.estimatedTombstoneDropTime, out);
+            out.writeInt(sstableStats.sstableLevel);
+            if (legacyDesc.version.tracksMaxMinColumnNames)
+                serializeMinMaxColumnNames(sstableStats.minColumnNames, sstableStats.maxColumnNames, out);
+        }
+
+        /**
+         * deserializes the metadata
+         *
+         * returns a pair containing the part of the metadata meant to be kept-in memory and the part
+         * that should not.
+         *
+         * @param descriptor the descriptor
+         * @return a pair containing data that needs to be in memory and data that is potentially big and is not needed
+         *         in memory
+         * @throws IOException
+         */
+        public Pair<SSTableMetadata, Set<Integer>> deserialize(Descriptor descriptor) throws IOException
+        {
+            return deserialize(descriptor, true);
+        }
+
+        public Pair<SSTableMetadata, Set<Integer>> deserialize(Descriptor descriptor, boolean loadSSTableLevel) throws IOException
         {
             logger.debug("Load metadata for {}", descriptor);
             File statsFile = new File(descriptor.filenameFor(SSTable.COMPONENT_STATS));
             if (!statsFile.exists())
             {
                 logger.debug("No sstable stats for {}", descriptor);
-                return new SSTableMetadata();
+                return Pair.create(new SSTableMetadata(), Collections.<Integer>emptySet());
             }
 
-            DataInputStream dis = new DataInputStream(new BufferedInputStream(new FileInputStream(statsFile)));
+            DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(statsFile)));
             try
             {
-                return deserialize(dis, descriptor);
+                return deserialize(in, descriptor, loadSSTableLevel);
             }
             finally
             {
-                FileUtils.closeQuietly(dis);
+                FileUtils.closeQuietly(in);
             }
         }
-
-        public SSTableMetadata deserialize(DataInputStream dis, Descriptor desc) throws IOException
+        public Pair<SSTableMetadata, Set<Integer>> deserialize(DataInputStream in, Descriptor desc) throws IOException
         {
-            EstimatedHistogram rowSizes = EstimatedHistogram.serializer.deserialize(dis);
-            EstimatedHistogram columnCounts = EstimatedHistogram.serializer.deserialize(dis);
-            ReplayPosition replayPosition = desc.version.metadataIncludesReplayPosition
-                                          ? ReplayPosition.serializer.deserialize(dis)
-                                          : ReplayPosition.NONE;
-            if (!desc.version.metadataIncludesModernReplayPosition)
-            {
-                // replay position may be "from the future" thanks to older versions generating them with nanotime.
-                // make sure we don't omit replaying something that we should.  see CASSANDRA-4782
-                replayPosition = ReplayPosition.NONE;
-            }
-            long minTimestamp = desc.version.tracksMinTimestamp ? dis.readLong() : Long.MIN_VALUE;
-            if (!desc.version.tracksMinTimestamp)
-                minTimestamp = Long.MAX_VALUE;
-            long maxTimestamp = desc.version.containsTimestamp() ? dis.readLong() : Long.MIN_VALUE;
-            if (!desc.version.tracksMaxTimestamp) // see javadoc to Descriptor.containsTimestamp
-                maxTimestamp = Long.MAX_VALUE;
-            double compressionRatio = desc.version.hasCompressionRatio
-                                    ? dis.readDouble()
-                                    : NO_COMPRESSION_RATIO;
-            String partitioner = desc.version.hasPartitioner ? dis.readUTF() : null;
-            int nbAncestors = desc.version.hasAncestors ? dis.readInt() : 0;
+            return deserialize(in, desc, true);
+        }
+
+        public Pair<SSTableMetadata, Set<Integer>> deserialize(DataInputStream in, Descriptor desc, boolean loadSSTableLevel) throws IOException
+        {
+            EstimatedHistogram rowSizes = EstimatedHistogram.serializer.deserialize(in);
+            EstimatedHistogram columnCounts = EstimatedHistogram.serializer.deserialize(in);
+            ReplayPosition replayPosition = ReplayPosition.serializer.deserialize(in);
+            long minTimestamp = in.readLong();
+            long maxTimestamp = in.readLong();
+            int maxLocalDeletionTime = desc.version.tracksMaxLocalDeletionTime ? in.readInt() : Integer.MAX_VALUE;
+            double bloomFilterFPChance = desc.version.hasBloomFilterFPChance ? in.readDouble() : NO_BLOOM_FLITER_FP_CHANCE;
+            double compressionRatio = in.readDouble();
+            String partitioner = in.readUTF();
+            int nbAncestors = in.readInt();
             Set<Integer> ancestors = new HashSet<Integer>(nbAncestors);
             for (int i = 0; i < nbAncestors; i++)
-                ancestors.add(dis.readInt());
-            StreamingHistogram tombstoneHistogram = desc.version.tracksTombstones
-                                                   ? StreamingHistogram.serializer.deserialize(dis)
-                                                   : defaultTombstoneDropTimeHistogram();
-            return new SSTableMetadata(rowSizes, columnCounts, replayPosition, minTimestamp, maxTimestamp, compressionRatio, partitioner, ancestors, tombstoneHistogram);
+                ancestors.add(in.readInt());
+            StreamingHistogram tombstoneHistogram = StreamingHistogram.serializer.deserialize(in);
+            int sstableLevel = 0;
+
+            if (loadSSTableLevel && in.available() > 0)
+                sstableLevel = in.readInt();
+
+            List<ByteBuffer> minColumnNames;
+            List<ByteBuffer> maxColumnNames;
+            if (desc.version.tracksMaxMinColumnNames)
+            {
+                int colCount = in.readInt();
+                minColumnNames = new ArrayList<ByteBuffer>(colCount);
+                for (int i = 0; i < colCount; i++)
+                {
+                    minColumnNames.add(ByteBufferUtil.readWithShortLength(in));
+                }
+                colCount = in.readInt();
+                maxColumnNames = new ArrayList<ByteBuffer>(colCount);
+                for (int i = 0; i < colCount; i++)
+                {
+                    maxColumnNames.add(ByteBufferUtil.readWithShortLength(in));
+                }
+            }
+            else
+            {
+                minColumnNames = Collections.emptyList();
+                maxColumnNames = Collections.emptyList();
+            }
+            return Pair.create(new SSTableMetadata(rowSizes,
+                                       columnCounts,
+                                       replayPosition,
+                                       minTimestamp,
+                                       maxTimestamp,
+                                       maxLocalDeletionTime,
+                                       bloomFilterFPChance,
+                                       compressionRatio,
+                                       partitioner,
+                                       tombstoneHistogram,
+                                       sstableLevel,
+                                       minColumnNames,
+                                       maxColumnNames), ancestors);
         }
     }
 }

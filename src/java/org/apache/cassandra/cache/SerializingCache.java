@@ -154,7 +154,7 @@ public class SerializingCache<K, V> implements ICache<K, V>
         map.clear();
     }
 
-    public V get(Object key)
+    public V get(K key)
     {
         RefCountedMemory mem = map.get(key);
         if (mem == null)
@@ -248,10 +248,5 @@ public class SerializingCache<K, V> implements ICache<K, V>
     public boolean containsKey(K key)
     {
         return map.containsKey(key);
-    }
-
-    public boolean isPutCopying()
-    {
-        return true;
     }
 }

@@ -24,6 +24,7 @@ import java.util.Collection;
 import java.util.UUID;
 
 import com.google.common.collect.Iterables;
+
 import static com.google.common.base.Charsets.ISO_8859_1;
 
 import org.apache.cassandra.db.TypeSizes;
@@ -32,6 +33,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
+
 import org.apache.commons.lang.StringUtils;
 
 
@@ -40,11 +42,11 @@ import org.apache.commons.lang.StringUtils;
  * application wants to make available to the rest of the nodes in the cluster.
  * Whenever a piece of state needs to be disseminated to the rest of cluster wrap
  * the state in an instance of <i>ApplicationState</i> and add it to the Gossiper.
- *
+ * <p/>
  * e.g. if we want to disseminate load information for node A do the following:
- *
- *      ApplicationState loadState = new ApplicationState(<string representation of load>);
- *      Gossiper.instance.addApplicationState("LOAD STATE", loadState);
+ * <p/>
+ * ApplicationState loadState = new ApplicationState(<string representation of load>);
+ * Gossiper.instance.addApplicationState("LOAD STATE", loadState);
  */
 
 public class VersionedValue implements Comparable<VersionedValue>
@@ -54,7 +56,7 @@ public class VersionedValue implements Comparable<VersionedValue>
 
     // this must be a char that cannot be present in any token
     public final static char DELIMITER = ',';
-    public final static String DELIMITER_STR = new String(new char[] { DELIMITER });
+    public final static String DELIMITER_STR = new String(new char[]{ DELIMITER });
 
     // values for ApplicationState.STATUS
     public final static String STATUS_BOOTSTRAPPING = "BOOT";
@@ -98,7 +100,7 @@ public class VersionedValue implements Comparable<VersionedValue>
         return "Value(" + value + "," + version + ")";
     }
 
-    private static String versionString(String...args)
+    private static String versionString(String... args)
     {
         return StringUtils.join(args, VersionedValue.DELIMITER);
     }
@@ -142,14 +144,14 @@ public class VersionedValue implements Comparable<VersionedValue>
         public VersionedValue leaving(Collection<Token> tokens)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_LEAVING,
-                    makeTokenString(tokens)));
+                                                    makeTokenString(tokens)));
         }
 
         public VersionedValue left(Collection<Token> tokens, long expireTime)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_LEFT,
-                    Long.toString(expireTime),
-                    makeTokenString(tokens)));
+                                                    makeTokenString(tokens),
+                                                    Long.toString(expireTime)));
         }
 
         public VersionedValue moving(Token token)
@@ -171,10 +173,10 @@ public class VersionedValue implements Comparable<VersionedValue>
         public VersionedValue tokens(Collection<Token> tokens)
         {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(bos);
+            DataOutputStream out = new DataOutputStream(bos);
             try
             {
-                TokenSerializer.serialize(partitioner, tokens, dos);
+                TokenSerializer.serialize(partitioner, tokens, out);
             }
             catch (IOException e)
             {
@@ -241,49 +243,21 @@ public class VersionedValue implements Comparable<VersionedValue>
 
     private static class VersionedValueSerializer implements IVersionedSerializer<VersionedValue>
     {
-        public void serialize(VersionedValue value, DataOutput dos, int version) throws IOException
+        public void serialize(VersionedValue value, DataOutput out, int version) throws IOException
         {
-            dos.writeUTF(outValue(value, version));
-            dos.writeInt(value.version);
+            out.writeUTF(outValue(value, version));
+            out.writeInt(value.version);
         }
 
         private String outValue(VersionedValue value, int version)
         {
-            String outValue = value.value;
-
-            if (version < MessagingService.VERSION_12)
-            {
-                String[] pieces = value.value.split(DELIMITER_STR, -1);
-                String type = pieces[0];
-
-                if ((type.equals(STATUS_NORMAL)) || type.equals(STATUS_BOOTSTRAPPING))
-                {
-                    assert pieces.length >= 2;
-                    outValue = versionString(pieces[0], pieces[1]);
-                }
-
-                if (type.equals(STATUS_LEFT))
-                {
-                    assert pieces.length >= 3;
-
-                    // three component 'left' was adopted starting from Cassandra 1.0
-                    // previous versions have '<type>:<token>' format
-                    outValue = (version < MessagingService.VERSION_10)
-                                ? versionString(pieces[0], pieces[2])
-                                : versionString(pieces[0], pieces[2], pieces[1]);
-                }
-
-                if ((type.equals(REMOVAL_COORDINATOR)) || (type.equals(REMOVING_TOKEN)) || (type.equals(REMOVED_TOKEN)))
-                    throw new RuntimeException(String.format("Unable to serialize %s(%s...) for nodes older than 1.2",
-                                                             VersionedValue.class.getName(), type));
-            }
-            return outValue;
+            return value.value;
         }
 
-        public VersionedValue deserialize(DataInput dis, int version) throws IOException
+        public VersionedValue deserialize(DataInput in, int version) throws IOException
         {
-            String value = dis.readUTF();
-            int valVersion = dis.readInt();
+            String value = in.readUTF();
+            int valVersion = in.readInt();
             return new VersionedValue(value, valVersion);
         }
 

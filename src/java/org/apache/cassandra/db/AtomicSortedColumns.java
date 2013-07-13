@@ -24,11 +24,11 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.google.common.base.Function;
 import edu.stanford.ppl.concurrent.SnapTreeMap;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.utils.Allocator;
-
 
 /**
  * A thread-safe and atomic ISortedColumns implementation.
@@ -44,43 +44,27 @@ import org.apache.cassandra.utils.Allocator;
  * WARNING: removing element through getSortedColumns().iterator() is *not*
  * isolated of other operations and could actually be fully ignored in the
  * face of a concurrent. Don't use it unless in a non-concurrent context.
- *
- * TODO: check the snaptree license make it ok to use
  */
-public class AtomicSortedColumns implements ISortedColumns
+public class AtomicSortedColumns extends ColumnFamily
 {
     private final AtomicReference<Holder> ref;
 
-    public static final ISortedColumns.Factory factory = new Factory()
+    public static final ColumnFamily.Factory<AtomicSortedColumns> factory = new Factory<AtomicSortedColumns>()
     {
-        public ISortedColumns create(AbstractType<?> comparator, boolean insertReversed)
+        public AtomicSortedColumns create(CFMetaData metadata, boolean insertReversed)
         {
-            return new AtomicSortedColumns(comparator);
-        }
-
-        public ISortedColumns fromSorted(SortedMap<ByteBuffer, Column> sortedMap, boolean insertReversed)
-        {
-            return new AtomicSortedColumns(sortedMap);
+            return new AtomicSortedColumns(metadata);
         }
     };
 
-    public static ISortedColumns.Factory factory()
+    private AtomicSortedColumns(CFMetaData metadata)
     {
-        return factory;
+        this(metadata, new Holder(metadata.comparator));
     }
 
-    private AtomicSortedColumns(AbstractType<?> comparator)
+    private AtomicSortedColumns(CFMetaData metadata, Holder holder)
     {
-        this(new Holder(comparator));
-    }
-
-    private AtomicSortedColumns(SortedMap<ByteBuffer, Column> columns)
-    {
-        this(new Holder(columns));
-    }
-
-    private AtomicSortedColumns(Holder holder)
-    {
+        super(metadata);
         this.ref = new AtomicReference<Holder>(holder);
     }
 
@@ -89,29 +73,42 @@ public class AtomicSortedColumns implements ISortedColumns
         return (AbstractType<?>)ref.get().map.comparator();
     }
 
-    public ISortedColumns.Factory getFactory()
+    public ColumnFamily.Factory getFactory()
     {
         return factory;
     }
 
-    public ISortedColumns cloneMe()
+    public ColumnFamily cloneMe()
     {
-        return new AtomicSortedColumns(ref.get().cloneMe());
+        return new AtomicSortedColumns(metadata, ref.get().cloneMe());
     }
 
-    public DeletionInfo getDeletionInfo()
+    public DeletionInfo deletionInfo()
     {
         return ref.get().deletionInfo;
     }
 
+    public void delete(DeletionTime delTime)
+    {
+        delete(new DeletionInfo(delTime));
+    }
+
+    protected void delete(RangeTombstone tombstone)
+    {
+        delete(new DeletionInfo(tombstone, getComparator()));
+    }
+
     public void delete(DeletionInfo info)
     {
+        if (info.isLive())
+            return;
+
         // Keeping deletion info for max markedForDeleteAt value
         while (true)
         {
             Holder current = ref.get();
-            DeletionInfo newDelInfo = current.deletionInfo.add(info);
-            if (newDelInfo == current.deletionInfo || ref.compareAndSet(current, current.with(newDelInfo)))
+            DeletionInfo newDelInfo = current.deletionInfo.copy().add(info);
+            if (ref.compareAndSet(current, current.with(newDelInfo)))
                 break;
         }
     }
@@ -126,22 +123,14 @@ public class AtomicSortedColumns implements ISortedColumns
         while (true)
         {
             Holder current = ref.get();
-            DeletionInfo purgedInfo = current.deletionInfo.purge(gcBefore);
-            if (purgedInfo == current.deletionInfo || ref.compareAndSet(current, current.with(DeletionInfo.LIVE)))
+            if (!current.deletionInfo.hasIrrelevantData(gcBefore))
+                break;
+
+            DeletionInfo purgedInfo = current.deletionInfo.copy();
+            purgedInfo.purge(gcBefore);
+            if (ref.compareAndSet(current, current.with(purgedInfo)))
                 break;
         }
-    }
-
-    public void retainAll(ISortedColumns columns)
-    {
-        Holder current, modified;
-        do
-        {
-            current = ref.get();
-            modified = current.cloneMe();
-            modified.retainAll(columns);
-        }
-        while (!ref.compareAndSet(current, modified));
     }
 
     public void addColumn(Column column, Allocator allocator)
@@ -156,12 +145,17 @@ public class AtomicSortedColumns implements ISortedColumns
         while (!ref.compareAndSet(current, modified));
     }
 
-    public void addAll(ISortedColumns cm, Allocator allocator, Function<Column, Column> transformation)
+    public void addAll(ColumnFamily cm, Allocator allocator, Function<Column, Column> transformation)
     {
         addAllWithSizeDelta(cm, allocator, transformation, SecondaryIndexManager.nullUpdater);
     }
 
-    public long addAllWithSizeDelta(ISortedColumns cm, Allocator allocator, Function<Column, Column> transformation, SecondaryIndexManager.Updater indexer)
+    /**
+     *  This is only called by Memtable.resolve, so only AtomicSortedColumns needs to implement it.
+     *
+     *  @return the difference in size seen after merging the given columns
+     */
+    public long addAllWithSizeDelta(ColumnFamily cm, Allocator allocator, Function<Column, Column> transformation, SecondaryIndexManager.Updater indexer)
     {
         /*
          * This operation needs to atomicity and isolation. To that end, we
@@ -182,10 +176,10 @@ public class AtomicSortedColumns implements ISortedColumns
         {
             sizeDelta = 0;
             current = ref.get();
-            DeletionInfo newDelInfo = current.deletionInfo.add(cm.getDeletionInfo());
+            DeletionInfo newDelInfo = current.deletionInfo.copy().add(cm.deletionInfo());
             modified = new Holder(current.map.clone(), newDelInfo);
 
-            for (Column column : cm.getSortedColumns())
+            for (Column column : cm)
             {
                 sizeDelta += modified.addColumn(transformation.apply(column), allocator, indexer);
                 // bail early if we know we've been beaten
@@ -194,6 +188,8 @@ public class AtomicSortedColumns implements ISortedColumns
             }
         }
         while (!ref.compareAndSet(current, modified));
+
+        indexer.updateRowLevelIndexes();
 
         return sizeDelta;
     }
@@ -213,18 +209,6 @@ public class AtomicSortedColumns implements ISortedColumns
         }
         while (!ref.compareAndSet(current, modified));
         return replaced;
-    }
-
-    public void removeColumn(ByteBuffer name)
-    {
-        Holder current, modified;
-        do
-        {
-            current = ref.get();
-            modified = current.cloneMe();
-            modified.map.remove(name);
-        }
-        while (!ref.compareAndSet(current, modified));
     }
 
     public void clear()
@@ -258,24 +242,9 @@ public class AtomicSortedColumns implements ISortedColumns
         return ref.get().map.descendingMap().values();
     }
 
-    public int size()
+    public int getColumnCount()
     {
         return ref.get().map.size();
-    }
-
-    public int getEstimatedColumnCount()
-    {
-        return size();
-    }
-
-    public boolean isEmpty()
-    {
-        return ref.get().map.isEmpty();
-    }
-
-    public Iterator<Column> iterator()
-    {
-        return getSortedColumns().iterator();
     }
 
     public Iterator<Column> iterator(ColumnSlice[] slices)
@@ -295,17 +264,16 @@ public class AtomicSortedColumns implements ISortedColumns
 
     private static class Holder
     {
+        // This is a small optimization: DeletionInfo is mutable, but we know that we will always copy it in that class,
+        // so we can safely alias one DeletionInfo.live() reference and avoid some allocations.
+        private static final DeletionInfo LIVE = DeletionInfo.live();
+
         final SnapTreeMap<ByteBuffer, Column> map;
         final DeletionInfo deletionInfo;
 
         Holder(AbstractType<?> comparator)
         {
-            this(new SnapTreeMap<ByteBuffer, Column>(comparator), DeletionInfo.LIVE);
-        }
-
-        Holder(SortedMap<ByteBuffer, Column> columns)
-        {
-            this(new SnapTreeMap<ByteBuffer, Column>(columns), DeletionInfo.LIVE);
+            this(new SnapTreeMap<ByteBuffer, Column>(comparator), LIVE);
         }
 
         Holder(SnapTreeMap<ByteBuffer, Column> map, DeletionInfo deletionInfo)
@@ -333,7 +301,7 @@ public class AtomicSortedColumns implements ISortedColumns
         // afterwards.
         Holder clear()
         {
-            return new Holder(new SnapTreeMap<ByteBuffer, Column>(map.comparator()), deletionInfo);
+            return new Holder(new SnapTreeMap<ByteBuffer, Column>(map.comparator()), LIVE);
         }
 
         long addColumn(Column column, Allocator allocator, SecondaryIndexManager.Updater indexer)
@@ -361,38 +329,6 @@ public class AtomicSortedColumns implements ISortedColumns
                 }
                 // We failed to replace column due to a concurrent update or a concurrent removal. Keep trying.
                 // (Currently, concurrent removal should not happen (only updates), but let us support that anyway.)
-            }
-        }
-
-        void retainAll(ISortedColumns columns)
-        {
-            Iterator<Column> iter = map.values().iterator();
-            Iterator<Column> toRetain = columns.iterator();
-            Column current = iter.hasNext() ? iter.next() : null;
-            Column retain = toRetain.hasNext() ? toRetain.next() : null;
-            Comparator<? super ByteBuffer> comparator = map.comparator();
-            while (current != null && retain != null)
-            {
-                int c = comparator.compare(current.name(), retain.name());
-                if (c == 0)
-                {
-                    current = iter.hasNext() ? iter.next() : null;
-                    retain = toRetain.hasNext() ? toRetain.next() : null;
-                }
-                else if (c < 0)
-                {
-                    iter.remove();
-                    current = iter.hasNext() ? iter.next() : null;
-                }
-                else // c > 0
-                {
-                    retain = toRetain.hasNext() ? toRetain.next() : null;
-                }
-            }
-            while (current != null)
-            {
-                iter.remove();
-                current = iter.hasNext() ? iter.next() : null;
             }
         }
     }

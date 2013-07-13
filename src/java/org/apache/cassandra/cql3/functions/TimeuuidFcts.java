@@ -18,16 +18,12 @@
 package org.apache.cassandra.cql3.functions;
 
 import java.nio.ByteBuffer;
-import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
-import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.DateType;
+import org.apache.cassandra.db.marshal.TimestampType;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
 import org.apache.cassandra.db.marshal.LongType;
-import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
 
@@ -39,29 +35,35 @@ public abstract class TimeuuidFcts
         {
             return ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
         }
-    };
 
-    public static final Function minTimeuuidFct = new AbstractFunction("mintimeuuid", TimeUUIDType.instance, DateType.instance)
-    {
-        public ByteBuffer execute(List<ByteBuffer> parameters)
+        @Override
+        public boolean isPure()
         {
-            return ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.minTimeUUID(DateType.instance.compose(parameters.get(0)).getTime())));
+            return false;
         }
     };
 
-    public static final Function maxTimeuuidFct = new AbstractFunction("maxtimeuuid", TimeUUIDType.instance, DateType.instance)
+    public static final Function minTimeuuidFct = new AbstractFunction("mintimeuuid", TimeUUIDType.instance, TimestampType.instance)
     {
         public ByteBuffer execute(List<ByteBuffer> parameters)
         {
-            return ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.maxTimeUUID(DateType.instance.compose(parameters.get(0)).getTime())));
+            return ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.minTimeUUID(TimestampType.instance.compose(parameters.get(0)).getTime())));
         }
     };
 
-    public static final Function dateOfFct = new AbstractFunction("dateof", DateType.instance, TimeUUIDType.instance)
+    public static final Function maxTimeuuidFct = new AbstractFunction("maxtimeuuid", TimeUUIDType.instance, TimestampType.instance)
     {
         public ByteBuffer execute(List<ByteBuffer> parameters)
         {
-            return DateType.instance.decompose(new Date(UUIDGen.unixTimestamp(UUIDGen.getUUID(parameters.get(0)))));
+            return ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.maxTimeUUID(TimestampType.instance.compose(parameters.get(0)).getTime())));
+        }
+    };
+
+    public static final Function dateOfFct = new AbstractFunction("dateof", TimestampType.instance, TimeUUIDType.instance)
+    {
+        public ByteBuffer execute(List<ByteBuffer> parameters)
+        {
+            return TimestampType.instance.decompose(new Date(UUIDGen.unixTimestamp(UUIDGen.getUUID(parameters.get(0)))));
         }
     };
 

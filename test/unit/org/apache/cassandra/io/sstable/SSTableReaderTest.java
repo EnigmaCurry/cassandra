@@ -21,23 +21,25 @@ package org.apache.cassandra.io.sstable;
  */
 
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
-import java.util.*;
 
+import org.junit.Assert;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
+import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.ICompactionScanner;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.LocalPartitioner;
 import org.apache.cassandra.dht.LocalToken;
@@ -45,16 +47,16 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.MmappedSegmentedFile;
 import org.apache.cassandra.io.util.SegmentedFile;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.IndexExpression;
 import org.apache.cassandra.thrift.IndexOperator;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.CLibrary;
 import org.apache.cassandra.utils.Pair;
+import static org.junit.Assert.assertTrue;
 
+@RunWith(OrderedJUnit4ClassRunner.class)
 public class SSTableReaderTest extends SchemaLoader
 {
     static Token t(int i)
@@ -65,8 +67,8 @@ public class SSTableReaderTest extends SchemaLoader
     @Test
     public void testGetPositionsForRanges() throws IOException, ExecutionException, InterruptedException
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard2");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
 
         // insert data and compact to a single sstable
         CompactionManager.instance.disableAutoCompaction();
@@ -106,8 +108,8 @@ public class SSTableReaderTest extends SchemaLoader
     {
         MmappedSegmentedFile.MAX_SEGMENT_SIZE = 40; // each index entry is ~11 bytes, so this will generate lots of segments
 
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
 
         // insert a bunch of data and compact to a single sstable
         CompactionManager.instance.disableAutoCompaction();
@@ -127,9 +129,7 @@ public class SSTableReaderTest extends SchemaLoader
         {
             DecoratedKey dk = Util.dk(String.valueOf(j));
             FileDataInput file = sstable.getFileDataInput(sstable.getPosition(dk, SSTableReader.Operator.EQ).position);
-            DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.partitioner,
-                                                             sstable.descriptor,
-                                                             ByteBufferUtil.readWithShortLength(file));
+            DecoratedKey keyInDisk = sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(file));
             assert keyInDisk.equals(dk) : String.format("%s != %s in %s", keyInDisk, dk, file.getPath());
         }
 
@@ -145,8 +145,8 @@ public class SSTableReaderTest extends SchemaLoader
     public void testPersistentStatistics() throws IOException, ExecutionException, InterruptedException
     {
 
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
 
         for (int j = 0; j < 100; j += 2)
         {
@@ -170,8 +170,8 @@ public class SSTableReaderTest extends SchemaLoader
     @Test
     public void testGetPositionsForRangesWithKeyCache() throws IOException, ExecutionException, InterruptedException
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Standard2");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
         CacheService.instance.keyCache.setCapacity(100);
 
         // insert data and compact to a single sstable
@@ -205,41 +205,13 @@ public class SSTableReaderTest extends SchemaLoader
     public void testPersistentStatisticsWithSecondaryIndex() throws IOException, ExecutionException, InterruptedException
     {
         // Create secondary index and flush to disk
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Indexed1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Indexed1");
         ByteBuffer key = ByteBufferUtil.bytes(String.valueOf("k1"));
         RowMutation rm = new RowMutation("Keyspace1", key);
         rm.add("Indexed1", ByteBufferUtil.bytes("birthdate"), ByteBufferUtil.bytes(1L), System.currentTimeMillis());
         rm.apply();
         store.forceBlockingFlush();
-
-        // check if opening and querying works
-        assertIndexQueryWorks(store);
-    }
-
-    @Test
-    public void testPersistentStatisticsFromOlderIndexedSSTable() throws IOException, ExecutionException, InterruptedException
-    {
-        // copy legacy indexed sstables
-        String root = System.getProperty("legacy-sstable-root");
-        assert root != null;
-        File rootDir = new File(root + File.separator + "hb" + File.separator + "Keyspace1");
-        assert rootDir.isDirectory();
-
-        File destDir = Directories.create("Keyspace1", "Indexed1").getDirectoryForNewSSTables(0);
-        assert destDir != null;
-
-        FileUtils.createDirectory(destDir);
-        for (File srcFile : rootDir.listFiles())
-        {
-            if (!srcFile.getName().startsWith("Indexed1"))
-                continue;
-            File destFile = new File(destDir, srcFile.getName());
-            CLibrary.createHardLink(srcFile, destFile);
-
-            assert destFile.exists() : destFile.getAbsoluteFile();
-        }
-        ColumnFamilyStore store = Table.open("Keyspace1").getColumnFamilyStore("Indexed1");
 
         // check if opening and querying works
         assertIndexQueryWorks(store);
@@ -252,8 +224,8 @@ public class SSTableReaderTest extends SchemaLoader
         String cf = "Standard1";
 
         // clear and create just one sstable for this test
-        Table table = Table.open(ks);
-        ColumnFamilyStore store = table.getColumnFamilyStore(cf);
+        Keyspace keyspace = Keyspace.open(ks);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(cf);
         store.clearUnsafe();
         store.disableAutoCompaction();
 
@@ -280,8 +252,8 @@ public class SSTableReaderTest extends SchemaLoader
 
         // test to see if sstable can be opened as expected
         SSTableReader target = SSTableReader.open(desc);
-        Collection<DecoratedKey> keySamples = target.getKeySamples();
-        assert keySamples.size() == 1 && keySamples.iterator().next().equals(firstKey);
+        Assert.assertEquals(target.getKeySampleSize(), 1);
+        Assert.assertArrayEquals(ByteBufferUtil.getArray(firstKey.key), target.getKeySample(0));
         assert target.first.equals(firstKey);
         assert target.last.equals(lastKey);
     }
@@ -289,8 +261,8 @@ public class SSTableReaderTest extends SchemaLoader
     @Test
     public void testLoadingSummaryUsesCorrectPartitioner() throws Exception
     {
-        Table table = Table.open("Keyspace1");
-        ColumnFamilyStore store = table.getColumnFamilyStore("Indexed1");
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Indexed1");
         ByteBuffer key = ByteBufferUtil.bytes(String.valueOf("k1"));
         RowMutation rm = new RowMutation("Keyspace1", key);
         rm.add("Indexed1", ByteBufferUtil.bytes("birthdate"), ByteBufferUtil.bytes(1L), System.currentTimeMillis());
@@ -312,6 +284,27 @@ public class SSTableReaderTest extends SchemaLoader
         assert reopened.first.token instanceof LocalToken;
     }
 
+    /** see CASSANDRA-5407 */
+    @Test
+    public void testGetScannerForNoIntersectingRanges()
+    {
+        Keyspace keyspace = Keyspace.open("Keyspace1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        ByteBuffer key = ByteBufferUtil.bytes(String.valueOf("k1"));
+        RowMutation rm = new RowMutation("Keyspace1", key);
+        rm.add("Standard1", ByteBufferUtil.bytes("xyz"), ByteBufferUtil.bytes("abc"), 0);
+        rm.apply();
+        store.forceBlockingFlush();
+        boolean foundScanner = false;
+        for (SSTableReader s : store.getSSTables())
+        {
+            ICompactionScanner scanner = s.getScanner(new Range<Token>(t(0), t(1), s.partitioner), null);
+            scanner.next(); // throws exception pre 5407
+            foundScanner = true;
+        }
+        assertTrue(foundScanner);
+    }
+
     private void assertIndexQueryWorks(ColumnFamilyStore indexedCFS) throws IOException
     {
         assert "Indexed1".equals(indexedCFS.name);
@@ -325,7 +318,7 @@ public class SSTableReaderTest extends SchemaLoader
         List<IndexExpression> clause = Arrays.asList(expr);
         IPartitioner p = StorageService.getPartitioner();
         Range<RowPosition> range = Util.range("", "");
-        List<Row> rows = indexedCFS.search(clause, range, 100, new IdentityQueryFilter());
+        List<Row> rows = indexedCFS.search(range, clause, new IdentityQueryFilter(), 100);
         assert rows.size() == 1;
     }
 

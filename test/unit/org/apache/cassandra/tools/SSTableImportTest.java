@@ -32,13 +32,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.db.Column;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.CounterColumn;
-import org.apache.cassandra.db.DeletedColumn;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.ExpiringColumn;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.CompositeType;
@@ -59,9 +53,9 @@ public class SSTableImportTest extends SchemaLoader
 
         // Verify results
         SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(tempSS.getPath()));
-        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1");
+        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1", System.currentTimeMillis());
         OnDiskAtomIterator iter = qf.getSSTableColumnIterator(reader);
-        ColumnFamily cf = iter.getColumnFamily();
+        ColumnFamily cf = cloneForAdditions(iter);
         while (iter.hasNext()) cf.addAtom(iter.next());
         assert cf.getColumn(ByteBufferUtil.bytes("colAA")).value().equals(hexToBytes("76616c4141"));
         assert !(cf.getColumn(ByteBufferUtil.bytes("colAA")) instanceof DeletedColumn);
@@ -69,6 +63,11 @@ public class SSTableImportTest extends SchemaLoader
         assert expCol.value().equals(hexToBytes("76616c4143"));
         assert expCol instanceof ExpiringColumn;
         assert ((ExpiringColumn)expCol).getTimeToLive() == 42 && expCol.getLocalDeletionTime() == 2000000000;
+    }
+
+    private ColumnFamily cloneForAdditions(OnDiskAtomIterator iter)
+    {
+        return iter.getColumnFamily().cloneMeShallow(ArrayBackedSortedColumns.factory, false);
     }
 
     private String resourcePath(String name) throws URISyntaxException
@@ -88,9 +87,9 @@ public class SSTableImportTest extends SchemaLoader
 
         // Verify results
         SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(tempSS.getPath()));
-        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1");
+        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1", System.currentTimeMillis());
         OnDiskAtomIterator iter = qf.getSSTableColumnIterator(reader);
-        ColumnFamily cf = iter.getColumnFamily();
+        ColumnFamily cf = cloneForAdditions(iter);
         while (iter.hasNext()) cf.addAtom(iter.next());
         assert cf.getColumn(ByteBufferUtil.bytes("colAA")).value().equals(hexToBytes("76616c4141"));
         assert !(cf.getColumn(ByteBufferUtil.bytes("colAA")) instanceof DeletedColumn);
@@ -109,11 +108,11 @@ public class SSTableImportTest extends SchemaLoader
 
         // Verify results
         SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(tempSS.getPath()));
-        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Super4");
-        ColumnFamily cf = qf.getSSTableColumnIterator(reader).getColumnFamily();
-        qf.collateOnDiskAtom(cf, Collections.singletonList(qf.getSSTableColumnIterator(reader)), Integer.MIN_VALUE);
+        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Super4", System.currentTimeMillis());
+        ColumnFamily cf = cloneForAdditions(qf.getSSTableColumnIterator(reader));
+        qf.collateOnDiskAtom(cf, qf.getSSTableColumnIterator(reader), Integer.MIN_VALUE);
 
-        DeletionTime delTime = cf.deletionInfo().rangeCovering(CompositeType.build(ByteBufferUtil.bytes("superA"))).iterator().next();
+        DeletionTime delTime = cf.deletionInfo().rangeCovering(CompositeType.build(ByteBufferUtil.bytes("superA")));
         assertEquals("supercolumn deletion time did not match the expected time", new DeletionInfo(0, 0), new DeletionInfo(delTime));
         Column subColumn = cf.getColumn(CompositeType.build(ByteBufferUtil.bytes("superA"), ByteBufferUtil.bytes("636f6c4141")));
         assert subColumn.value().equals(hexToBytes("76616c75654141"));
@@ -138,9 +137,9 @@ public class SSTableImportTest extends SchemaLoader
         new SSTableImport().importJson(jsonUrl, "Keyspace1", "Standard1", tempSS.getPath());
 
         SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(tempSS.getPath()));
-        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1");
+        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1", System.currentTimeMillis());
         OnDiskAtomIterator iter = qf.getSSTableColumnIterator(reader);
-        ColumnFamily cf = iter.getColumnFamily();
+        ColumnFamily cf = cloneForAdditions(iter);
         while (iter.hasNext())
             cf.addAtom(iter.next());
         assert cf.getColumn(ByteBufferUtil.bytes("colAA")).value().equals(hexToBytes("76616c4141"));
@@ -161,9 +160,9 @@ public class SSTableImportTest extends SchemaLoader
 
         // Verify results
         SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(tempSS.getPath()));
-        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1");
+        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Standard1", System.currentTimeMillis());
         OnDiskAtomIterator iter = qf.getSSTableColumnIterator(reader);
-        ColumnFamily cf = iter.getColumnFamily();
+        ColumnFamily cf = cloneForAdditions(iter);
         assertEquals(cf.deletionInfo(), new DeletionInfo(0, 0));
         while (iter.hasNext())
             cf.addAtom(iter.next());
@@ -185,9 +184,9 @@ public class SSTableImportTest extends SchemaLoader
 
         // Verify results
         SSTableReader reader = SSTableReader.open(Descriptor.fromFilename(tempSS.getPath()));
-        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Counter1");
+        QueryFilter qf = QueryFilter.getIdentityFilter(Util.dk("rowA"), "Counter1", System.currentTimeMillis());
         OnDiskAtomIterator iter = qf.getSSTableColumnIterator(reader);
-        ColumnFamily cf = iter.getColumnFamily();
+        ColumnFamily cf = cloneForAdditions(iter);
         while (iter.hasNext()) cf.addAtom(iter.next());
         Column c = cf.getColumn(ByteBufferUtil.bytes("colAA"));
         assert c instanceof CounterColumn: c;

@@ -45,8 +45,8 @@ public class RowCacheTest extends SchemaLoader
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        Table table = Table.open(KEYSPACE);
-        ColumnFamilyStore cachedStore  = table.getColumnFamilyStore(COLUMN_FAMILY);
+        Keyspace keyspace = Keyspace.open(KEYSPACE);
+        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(COLUMN_FAMILY);
 
         // empty the row cache
         CacheService.instance.invalidateRowCache();
@@ -62,12 +62,22 @@ public class RowCacheTest extends SchemaLoader
         {
             DecoratedKey key = Util.dk("key" + i);
 
-            cachedStore.getColumnFamily(key, ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1);
+            cachedStore.getColumnFamily(key,
+                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                        false,
+                                        1,
+                                        System.currentTimeMillis());
             assert CacheService.instance.rowCache.size() == i + 1;
             assert cachedStore.containsCachedRow(key); // current key should be stored in the cache
 
             // checking if column is read correctly after cache
-            ColumnFamily cf = cachedStore.getColumnFamily(key, ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1);
+            ColumnFamily cf = cachedStore.getColumnFamily(key,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                          false,
+                                                          1,
+                                                          System.currentTimeMillis());
             Collection<Column> columns = cf.getSortedColumns();
 
             Column column = columns.iterator().next();
@@ -84,11 +94,21 @@ public class RowCacheTest extends SchemaLoader
         {
             DecoratedKey key = Util.dk("key" + i);
 
-            cachedStore.getColumnFamily(key, ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1);
+            cachedStore.getColumnFamily(key,
+                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                        false,
+                                        1,
+                                        System.currentTimeMillis());
             assert cachedStore.containsCachedRow(key); // cache should be populated with the latest rows read (old ones should be popped)
 
             // checking if column is read correctly after cache
-            ColumnFamily cf = cachedStore.getColumnFamily(key, ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1);
+            ColumnFamily cf = cachedStore.getColumnFamily(key,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                          false,
+                                                          1,
+                                                          System.currentTimeMillis());
             Collection<Column> columns = cf.getSortedColumns();
 
             Column column = columns.iterator().next();
@@ -114,7 +134,7 @@ public class RowCacheTest extends SchemaLoader
     public void testRowCacheLoad() throws Exception
     {
         CacheService.instance.setRowCacheCapacityInMB(1);
-        rowCacheLoad(100, Integer.MAX_VALUE, false);
+        rowCacheLoad(100, Integer.MAX_VALUE);
         CacheService.instance.setRowCacheCapacityInMB(0);
     }
 
@@ -122,15 +142,15 @@ public class RowCacheTest extends SchemaLoader
     public void testRowCachePartialLoad() throws Exception
     {
         CacheService.instance.setRowCacheCapacityInMB(1);
-        rowCacheLoad(100, 50, true);
+        rowCacheLoad(100, 50);
         CacheService.instance.setRowCacheCapacityInMB(0);
     }
 
-    public void rowCacheLoad(int totalKeys, int keysToSave, boolean reduceLoadCapacity) throws Exception
+    public void rowCacheLoad(int totalKeys, int keysToSave) throws Exception
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        ColumnFamilyStore store = Table.open(KEYSPACE).getColumnFamilyStore(COLUMN_FAMILY);
+        ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(COLUMN_FAMILY);
 
         // empty the cache
         CacheService.instance.invalidateRowCache();
@@ -143,9 +163,6 @@ public class RowCacheTest extends SchemaLoader
 
         // force the cache to disk
         CacheService.instance.rowCache.submitWrite(keysToSave).get();
-
-        if (reduceLoadCapacity)
-            CacheService.instance.reduceRowCacheSize();
 
         // empty the cache again to make sure values came from disk
         CacheService.instance.invalidateRowCache();

@@ -17,9 +17,7 @@
  */
 package org.apache.cassandra.utils;
 
-import java.io.File;
 import java.io.FileDescriptor;
-import java.io.IOException;
 import java.lang.reflect.Field;
 
 import org.slf4j.Logger;
@@ -49,12 +47,16 @@ public final class CLibrary
     private static final int POSIX_FADV_WILLNEED   = 3; /* fadvise.h */
     private static final int POSIX_FADV_DONTNEED   = 4; /* fadvise.h */
     private static final int POSIX_FADV_NOREUSE    = 5; /* fadvise.h */
+    
+    static boolean jnaAvailable = false;
+    static boolean jnaLockable = false;
 
     static
     {
         try
         {
             Native.register("c");
+            jnaAvailable = true;
         }
         catch (NoClassDefFoundError e)
         {
@@ -101,12 +103,23 @@ public final class CLibrary
     }
 
     private CLibrary() {}
+    
+    public static boolean jnaAvailable()
+    {
+        return jnaAvailable;
+    }
+    
+    public static boolean jnaMemoryLockable()
+    {
+        return jnaLockable;
+    }
 
     public static void tryMlockall()
     {
         try
         {
             mlockall(MCL_CURRENT);
+            jnaLockable = true;
             logger.info("JNA mlockall successful");
         }
         catch (UnsatisfiedLinkError e)
@@ -128,71 +141,6 @@ public final class CLibrary
                 // OS X allows mlockall to be called, but always returns an error
                 logger.warn("Unknown mlockall error " + errno(e));
             }
-        }
-    }
-
-    /**
-     * Create a hard link for a given file.
-     *
-     * @param sourceFile      The name of the source file.
-     * @param destinationFile The name of the destination file.
-     *
-     * @throws java.io.IOException if an error has occurred while creating the link.
-     */
-    public static void createHardLink(File sourceFile, File destinationFile) throws IOException
-    {
-        try
-        {
-            link(sourceFile.getAbsolutePath(), destinationFile.getAbsolutePath());
-        }
-        catch (UnsatisfiedLinkError e)
-        {
-            createHardLinkWithExec(sourceFile, destinationFile);
-        }
-        catch (RuntimeException e)
-        {
-            logger.error("Unable to create hard link", e);
-            if (!(e instanceof LastErrorException))
-                throw e;
-            // there are 17 different error codes listed on the man page.  punt until/unless we find which
-            // ones actually turn up in practice.
-            throw new IOException(String.format("Unable to create hard link from %s to %s (errno %d)",
-                                                sourceFile, destinationFile, errno(e)));
-        }
-    }
-
-    public static void createHardLinkWithExec(File sourceFile, File destinationFile) throws IOException
-    {
-        String osname = System.getProperty("os.name");
-        ProcessBuilder pb;
-        if (osname.startsWith("Windows"))
-        {
-            float osversion = Float.parseFloat(System.getProperty("os.version"));
-            if (osversion >= 6.0f)
-            {
-                pb = new ProcessBuilder("cmd", "/c", "mklink", "/H", destinationFile.getAbsolutePath(), sourceFile.getAbsolutePath());
-            }
-            else
-            {
-                pb = new ProcessBuilder("fsutil", "hardlink", "create", destinationFile.getAbsolutePath(), sourceFile.getAbsolutePath());
-            }
-        }
-        else
-        {
-            pb = new ProcessBuilder("ln", sourceFile.getAbsolutePath(), destinationFile.getAbsolutePath());
-            pb.redirectErrorStream(true);
-        }
-        try
-        {
-            FBUtilities.exec(pb);
-        }
-        catch (IOException ex)
-        {
-            String st = osname.startsWith("Windows")
-                      ? "Unable to create hard link.  This probably means your data directory path is too long.  Exception follows:"
-                      : "Unable to create hard link with exec.  Suggest installing JNA to avoid the need to exec entirely.  Exception follows: ";
-            logger.error(st, ex);
-            throw ex;
         }
     }
 
@@ -325,5 +273,26 @@ public final class CLibrary
         }
 
         return -1;
+    }
+
+    /**
+     * Suggest kernel to preheat one page for the given file.
+     *
+     * @param fd The file descriptor of file to preheat.
+     * @param position The offset of the block.
+     *
+     * @return On success, zero is returned. On error, an error number is returned.
+     */
+    public static int preheatPage(int fd, long position)
+    {
+        try
+        {
+            // 4096 is good for SSD because they operate on "Pages" 4KB in size
+            return posix_fadvise(fd, position, 4096, POSIX_FADV_WILLNEED);
+        }
+        catch (UnsatisfiedLinkError e)
+        {
+            return -1;
+        }
     }
 }

@@ -50,7 +50,6 @@ public class CliTest extends SchemaLoader
         "create column family 123 with comparator=UTF8Type and column_metadata=[{ column_name:world, validation_class:IntegerType, index_type:0, index_name:IdxName }, " +
                                                                                "{ column_name:world2, validation_class:LongType, index_type:KEYS, index_name:LongIdxName}, " +
                                                                                "{ column_name:617070, validation_class:UTF8Type, index_type:KEYS }, " +
-                                                                               "{ column_name:28292, validation_class:UTF8Type, index_type:CUSTOM, index_options:{class_name:'org.apache.cassandra.db.index.keys.KeysIndex', foo:bar}}," +
                                                                                "{ column_name:'-617071', validation_class:UTF8Type, index_type:KEYS }," +
                                                                                "{ column_name:time_spent_uuid, validation_class:TimeUUIDType}] and default_validation_class=UTF8Type;",
         "assume 123 keys as utf8;",
@@ -218,7 +217,7 @@ public class CliTest extends SchemaLoader
     };
 
     @Test
-    public void testCli() throws IOException, TException, ConfigurationException, ClassNotFoundException, TimedOutException, NotFoundException, SchemaDisagreementException, NoSuchFieldException, InvalidRequestException, UnavailableException, InstantiationException, IllegalAccessException
+    public void testCli() throws IOException, TException, TimedOutException, NotFoundException, SchemaDisagreementException, NoSuchFieldException, InvalidRequestException, UnavailableException, InstantiationException, IllegalAccessException
     {
         Schema.instance.clear(); // Schema are now written on disk and will be reloaded
         new EmbeddedCassandraService().start();
@@ -253,7 +252,14 @@ public class CliTest extends SchemaLoader
             CliMain.processStatement(statement);
             String result = outStream.toString();
             // System.out.println("Result:\n" + result);
-            assertEquals(errStream.toString() + " processing " + statement, "", errStream.toString());
+            if (statement.startsWith("show schema"))
+                assertEquals(errStream.toString() + "processing" + statement,
+                             "\nWARNING: CQL3 tables are intentionally omitted from 'show schema' output.\n"
+                             + "See https://issues.apache.org/jira/browse/CASSANDRA-4377 for details.\n\n",
+                             errStream.toString());
+            else
+                assertEquals(errStream.toString() + " processing " + statement, "", errStream.toString());
+
             if (statement.startsWith("drop ") || statement.startsWith("create ") || statement.startsWith("update "))
             {
                 assert Pattern.compile("(.{8})-(.{4})-(.{4})-(.{4})-(.{12}).*", Pattern.DOTALL).matcher(result).matches()
@@ -284,7 +290,7 @@ public class CliTest extends SchemaLoader
                 }
                 else
                 {
-                    assertTrue(result.startsWith("=> (column=") || result.startsWith("Value was not found"));
+                    assertTrue(result.startsWith("=> (name=") || result.startsWith("Value was not found"));
                 }
                 assertTrue(result.contains("Elapsed time:"));
             }

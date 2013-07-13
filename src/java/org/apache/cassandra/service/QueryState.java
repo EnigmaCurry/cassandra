@@ -17,9 +17,17 @@
  */
 package org.apache.cassandra.service;
 
+import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.UUID;
 
+import org.apache.cassandra.cql3.statements.SelectStatement;
+import org.apache.cassandra.db.Row;
+import org.apache.cassandra.exceptions.RequestValidationException;
+import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.service.pager.QueryPager;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -72,14 +80,13 @@ public class QueryState
     {
         if (this.preparedTracingSession == null)
         {
-            Tracing.instance().newSession();
+            Tracing.instance.newSession();
         }
         else
         {
             UUID session = this.preparedTracingSession;
             this.preparedTracingSession = null;
-            Tracing.instance().newSession(session);
+            Tracing.instance.newSession(session);
         }
     }
 }
-

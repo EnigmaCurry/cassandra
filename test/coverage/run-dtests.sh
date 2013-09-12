@@ -49,7 +49,7 @@ mv ../cobertura.ser .
 rm -rf demonstrate
 rm upgrade_through_versions_test*
 
-EXCLUDE_TESTS="-e 'upgrade|decommission|sstable_gen|global_row|putget_2dc|cql3_insert'"
+EXCLUDE_TESTS="-e 'decommission|sstable_gen|global_row|cql3_insert'"
 
 # Find a suitable nose executable:
 for nose in nosetests-2.7 nosetests-2.6 nosetests2 nosetests; do

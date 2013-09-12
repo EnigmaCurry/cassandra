@@ -45,4 +45,4 @@ done
 # Add Cobertura classes:
 CLASSPATH=$CLASSPATH:/home/ryan/.m2/repository/net/sourceforge/cobertura/cobertura/1.9.4.1/cobertura-1.9.4.1.jar
 
-JVM_OPTS="-Dnet.sourceforge.cobertura.datafile=$CASSANDRA_HOME/build/cobertura/cobertura.ser"
+JVM_OPTS="-Dnet.sourceforge.cobertura.datafile=$CASSANDRA_HOME/build/cobertura/cobertura.ser -XX:-UseSplitVerifier"

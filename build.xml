@@ -633,7 +633,7 @@
     </target>
     <target name="codecoverage" depends="maven-declare-dependencies,
                                          cobertura-instrument,
-                                         _ignoretestfail, test"
+                                         _ignoretestfail"
             description="Create code coverage report">
       <!-- Run Cassandra-dtests -->
       <exec executable="test/coverage/run-dtests.sh"

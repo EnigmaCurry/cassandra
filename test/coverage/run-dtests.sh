@@ -44,10 +44,8 @@ done
 # cassandra-dtest directory. For some reason, dtest will create a
 # local datafile regardless if you set the datafile path. So just go
 # with the flow and create it here locally:
+cp ../cobertura.ser ../cobertura-just-junit.ser
 mv ../cobertura.ser .
-# Delete some tests that aren't working:
-rm -rf demonstrate
-rm upgrade_through_versions_test*
 
 EXCLUDE_TESTS="-e 'decommission|sstable_gen|global_row|cql3_insert'"
 

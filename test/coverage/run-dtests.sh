@@ -58,7 +58,7 @@ done
 
 # First pass - Run dtests normally:
 echo "cassandra-dtests running..."
-$NOSE $EXCLUDE_TESTS -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
+PRINT_DEBUG=true $NOSE $EXCLUDE_TESTS -s -vvv --debug-log=nosetests.debug.log --with-xunit 2>&1 | tee nosetests.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do
@@ -68,7 +68,7 @@ done
 
 # Second pass - Run dtests with vnodes:
 echo "cassandra-dtests with vnodes running..."
-ENABLE_VNODES=true $NOSE $EXCLUDE_TESTS -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
+PRINT_DEBUG=true ENABLE_VNODES=true $NOSE $EXCLUDE_TESTS -s -vvv --debug-log=nosetests.vnodes.debug.log --with-xunit 2>&1 | tee nosetests.vnodes.log
 
 # Wait for cobertura data file to be unlocked:
 while [ -e cobertura.ser.lock ]; do

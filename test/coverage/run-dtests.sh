@@ -29,8 +29,7 @@ if [ $DEPENDENCIES_NOT_MET != 0 ] ; then
     exit 1;
 fi
 
-
-pushd $CASSANDRA_DIR/build/cobertura/
+cd $CASSANDRA_DIR/build/cobertura/
 
 # Clone cassandra-dtests:
 git clone git://github.com/riptano/cassandra-dtest.git

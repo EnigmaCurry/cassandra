@@ -1156,7 +1156,7 @@
     <cobertura-instrument todir="${cobertura.classes.dir}" datafile="${cobertura.datafile}">
       <ignore regex="org.apache.log4j.*"/>
 
-      <fileset dir="${build.classes.main}">
+      <fileset dir="${build.classes}">
         <include name="**/*.class"/>
         <exclude name="**/*Test.class"/>
         <exclude name="**/*TestCase.class"/>

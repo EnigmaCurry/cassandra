@@ -129,8 +129,8 @@ esac
 # times. If in doubt, and if you do not particularly want to tweak, go with
 # 100 MB per physical CPU core.
 
-#MAX_HEAP_SIZE="4G"
-#HEAP_NEWSIZE="800M"
+MAX_HEAP_SIZE="2G"
+HEAP_NEWSIZE="800M"
 
 # Set this to control the amount of arenas per-thread in glibc
 #MALLOC_ARENA_MAX=4
@@ -206,7 +206,7 @@ JVM_OPTS="$JVM_OPTS -XX:SurvivorRatio=8"
 JVM_OPTS="$JVM_OPTS -XX:MaxTenuringThreshold=1"
 JVM_OPTS="$JVM_OPTS -XX:CMSInitiatingOccupancyFraction=75"
 JVM_OPTS="$JVM_OPTS -XX:+UseCMSInitiatingOccupancyOnly"
-JVM_OPTS="$JVM_OPTS -XX:+UseTLAB"
+JVM_OPTS="$JVM_OPTS -XX:-UseTLAB"
 # note: bash evals '1.7.x' as > '1.7' so this is really a >= 1.7 jvm check
 if [ "$JVM_VERSION" \> "1.7" ] && [ "$JVM_ARCH" = "64-Bit" ] ; then
     JVM_OPTS="$JVM_OPTS -XX:+UseCondCardMark"

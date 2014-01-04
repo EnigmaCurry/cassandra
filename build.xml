@@ -677,7 +677,10 @@
             failonerror="true">
         <arg value="${basedir}"/>
       </exec>
-      <!-- Generage report -->
+    </target>
+
+    <target name="codecoverage-report">
+      <!-- Generage cobetura report -->
       <artifact:dependencies pathId="coverage-classpath">
         <dependency groupId="net.sourceforge.cobertura"
                     artifactId="cobertura"

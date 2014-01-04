@@ -28,6 +28,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.DataTracker;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -67,13 +68,17 @@ public class SSTableDeletingTask implements Runnable
 
     public void run()
     {
-        tracker.notifyDeleting(referent);
+        if (tracker != null)
+            tracker.notifyDeleting(referent);
+
+        if (referent.readMeter != null)
+            SystemKeyspace.clearSSTableReadMeter(referent.getKeyspaceName(), referent.getColumnFamilyName(), referent.descriptor.generation);
 
         // If we can't successfully delete the DATA component, set the task to be retried later: see above
         File datafile = new File(desc.filenameFor(Component.DATA));
         if (!datafile.delete())
         {
-            logger.error("Unable to delete " + datafile + " (it will be removed on server restart; we'll also retry after GC)");
+            logger.error("Unable to delete {} (it will be removed on server restart; we'll also retry after GC)", datafile);
             failedTasks.add(this);
             return;
         }

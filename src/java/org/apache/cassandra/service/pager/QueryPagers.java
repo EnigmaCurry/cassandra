@@ -57,7 +57,8 @@ public class QueryPagers
         {
             List<ReadCommand> commands = ((Pageable.ReadCommands)command).commands;
 
-            int maxQueried = 0;
+            // Using long on purpose, as we could overflow otherwise
+            long maxQueried = 0;
             for (ReadCommand readCmd : commands)
                 maxQueried += maxQueried(readCmd);
 
@@ -78,7 +79,7 @@ public class QueryPagers
     private static QueryPager pager(ReadCommand command, ConsistencyLevel consistencyLevel, boolean local, PagingState state)
     {
         if (command instanceof SliceByNamesReadCommand)
-            return new NamesQueryPager((SliceByNamesReadCommand)command, consistencyLevel, local, state);
+            return new NamesQueryPager((SliceByNamesReadCommand)command, consistencyLevel, local);
         else
             return new SliceQueryPager((SliceFromReadCommand)command, consistencyLevel, local, state);
     }
@@ -175,7 +176,7 @@ public class QueryPagers
         SliceFromReadCommand command = new SliceFromReadCommand(keyspace, key, columnFamily, now, filter);
         final SliceQueryPager pager = new SliceQueryPager(command, consistencyLevel, false);
 
-        ColumnCounter counter = filter.columnCounter(Schema.instance.getComparator(keyspace, columnFamily), now);
+        ColumnCounter counter = filter.columnCounter(Schema.instance.getCFMetaData(keyspace, columnFamily).comparator, now);
         while (!pager.isExhausted())
         {
             List<Row> next = pager.fetchPage(pageSize);

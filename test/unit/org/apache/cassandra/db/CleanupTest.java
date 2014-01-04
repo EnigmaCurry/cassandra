@@ -41,8 +41,6 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.thrift.IndexExpression;
-import org.apache.cassandra.thrift.IndexOperator;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CounterId;
 import org.junit.Test;
@@ -110,7 +108,7 @@ public class CleanupTest extends SchemaLoader
             Thread.sleep(10);
 
         // verify we get it back w/ index query too
-        IndexExpression expr = new IndexExpression(COLUMN, IndexOperator.EQ, VALUE);
+        IndexExpression expr = new IndexExpression(COLUMN, IndexExpression.Operator.EQ, VALUE);
         List<IndexExpression> clause = Arrays.asList(expr);
         IDiskAtomFilter filter = new IdentityQueryFilter();
         IPartitioner p = StorageService.getPartitioner();
@@ -149,9 +147,9 @@ public class CleanupTest extends SchemaLoader
         {
             String key = String.valueOf(i);
             // create a row and update the birthdate value, test that the index query fetches the new version
-            RowMutation rm;
-            rm = new RowMutation(KEYSPACE1, ByteBufferUtil.bytes(key));
-            rm.add(cfs.name, COLUMN, VALUE, System.currentTimeMillis());
+            Mutation rm;
+            rm = new Mutation(KEYSPACE1, ByteBufferUtil.bytes(key));
+            rm.add(cfs.name, Util.cellname(COLUMN), VALUE, System.currentTimeMillis());
             rm.applyUnsafe();
         }
 

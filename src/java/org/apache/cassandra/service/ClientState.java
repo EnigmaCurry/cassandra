@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.service;
 
+import java.net.SocketAddress;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -24,9 +25,8 @@ import java.util.concurrent.TimeUnit;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
+import com.google.common.collect.Sets;
 import org.apache.commons.lang3.StringUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -36,6 +36,8 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.exceptions.AuthenticationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.UnauthorizedException;
+import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.SemanticVersion;
 
@@ -44,11 +46,10 @@ import org.apache.cassandra.utils.SemanticVersion;
  */
 public class ClientState
 {
-    private static final Logger logger = LoggerFactory.getLogger(ClientState.class);
     public static final SemanticVersion DEFAULT_CQL_VERSION = org.apache.cassandra.cql3.QueryProcessor.CQL_VERSION;
 
-    private static final Set<IResource> READABLE_SYSTEM_RESOURCES = new HashSet<IResource>(5);
-    private static final Set<IResource> PROTECTED_AUTH_RESOURCES = new HashSet<IResource>();
+    private static final Set<IResource> READABLE_SYSTEM_RESOURCES = new HashSet<>();
+    private static final Set<IResource> PROTECTED_AUTH_RESOURCES = new HashSet<>();
 
     // User-level permissions cache.
     private static final LoadingCache<Pair<AuthenticatedUser, IResource>, Set<Permission>> permissionsCache = initPermissionsCache();
@@ -70,27 +71,53 @@ public class ClientState
 
     // Current user for the session
     private volatile AuthenticatedUser user;
-    private String keyspace;
+    private volatile String keyspace;
 
     private SemanticVersion cqlVersion;
 
-    // internalCall is used to mark ClientState as used by some internal component
-    // that should have an ability to modify system keyspace
-    private final boolean internalCall;
+    // isInternal is used to mark ClientState as used by some internal component
+    // that should have an ability to modify system keyspace.
+    private final boolean isInternal;
 
-    public ClientState()
+    // The remote address of the client - null for internal clients.
+    private final SocketAddress remoteAddress;
+
+    /**
+     * Construct a new, empty ClientState for internal calls.
+     */
+    private ClientState()
     {
-        this(false);
+        this.isInternal = true;
+        this.remoteAddress = null;
+    }
+
+    protected ClientState(SocketAddress remoteAddress)
+    {
+        this.isInternal = false;
+        this.remoteAddress = remoteAddress;
+        if (!DatabaseDescriptor.getAuthenticator().requireAuthentication())
+            this.user = AuthenticatedUser.ANONYMOUS_USER;
     }
 
     /**
-     * Construct a new, empty ClientState
+     * @return a ClientState object for internal C* calls (not limited by any kind of auth).
      */
-    public ClientState(boolean internalCall)
+    public static ClientState forInternalCalls()
     {
-        this.internalCall = internalCall;
-        if (!DatabaseDescriptor.getAuthenticator().requireAuthentication())
-            this.user = AuthenticatedUser.ANONYMOUS_USER;
+        return new ClientState();
+    }
+
+    /**
+     * @return a ClientState object for external clients (thrift/native protocol users).
+     */
+    public static ClientState forExternalCalls(SocketAddress remoteAddress)
+    {
+        return new ClientState(remoteAddress);
+    }
+
+    public SocketAddress getRemoteAddress()
+    {
+        return remoteAddress;
     }
 
     public String getRawKeyspace()
@@ -122,13 +149,12 @@ public class ClientState
         if (!user.isAnonymous() && !Auth.isExistingUser(user.getName()))
            throw new AuthenticationException(String.format("User %s doesn't exist - create it with CREATE USER query first",
                                                            user.getName()));
-
         this.user = user;
     }
 
     public void hasAllKeyspacesAccess(Permission perm) throws UnauthorizedException
     {
-        if (internalCall)
+        if (isInternal)
             return;
         validateLogin();
         ensureHasPermission(perm, DataResource.root());
@@ -142,6 +168,7 @@ public class ClientState
     public void hasColumnFamilyAccess(String keyspace, String columnFamily, Permission perm)
     throws UnauthorizedException, InvalidRequestException
     {
+        ThriftValidation.validateColumnFamily(keyspace, columnFamily);
         hasAccess(keyspace, perm, DataResource.columnFamily(keyspace, columnFamily));
     }
 
@@ -149,7 +176,7 @@ public class ClientState
     throws UnauthorizedException, InvalidRequestException
     {
         validateKeyspace(keyspace);
-        if (internalCall)
+        if (isInternal)
             return;
         validateLogin();
         preventSystemKSSchemaModification(keyspace, resource, perm);
@@ -164,10 +191,9 @@ public class ClientState
     public void ensureHasPermission(Permission perm, IResource resource) throws UnauthorizedException
     {
         for (IResource r : Resources.chain(resource))
-        {
             if (authorize(r).contains(perm))
                 return;
-        }
+
         throw new UnauthorizedException(String.format("User %s has no %s permission on %s or any of its parents",
                                                       user.getName(),
                                                       perm,
@@ -180,11 +206,13 @@ public class ClientState
         if (!(perm.equals(Permission.ALTER) || perm.equals(Permission.DROP) || perm.equals(Permission.CREATE)))
             return;
 
-        if (Schema.systemKeyspaceNames.contains(keyspace.toLowerCase()))
+        // prevent system keyspace modification
+        if (Keyspace.SYSTEM_KS.equalsIgnoreCase(keyspace))
             throw new UnauthorizedException(keyspace + " keyspace is not user-modifiable.");
 
-        // we want to allow altering AUTH_KS itself.
-        if (keyspace.equals(Auth.AUTH_KS) && !(resource.isKeyspaceLevel() && perm.equals(Permission.ALTER)))
+        // we want to allow altering AUTH_KS and TRACING_KS.
+        Set<String> allowAlter = Sets.newHashSet(Auth.AUTH_KS, Tracing.TRACE_KS);
+        if (allowAlter.contains(keyspace.toLowerCase()) && !(resource.isKeyspaceLevel() && perm.equals(Permission.ALTER)))
             throw new UnauthorizedException(String.format("Cannot %s %s", perm, resource));
     }
 

@@ -17,17 +17,16 @@
  */
 package org.apache.cassandra.metrics;
 
+import java.util.concurrent.TimeUnit;
+
 import com.yammer.metrics.Metrics;
-import com.yammer.metrics.core.Counter;
-import com.yammer.metrics.core.Gauge;
-import com.yammer.metrics.core.Histogram;
-import com.yammer.metrics.core.MetricName;
+import com.yammer.metrics.core.*;
 import com.yammer.metrics.util.RatioGauge;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.io.sstable.SSTableMetadata;
 import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.utils.EstimatedHistogram;
 
 /**
@@ -37,6 +36,8 @@ public class ColumnFamilyMetrics
 {
     /** Total amount of data stored in the memtable, including column related overhead. */
     public final Gauge<Long> memtableDataSize;
+    /** Total amount of data stored in the memtables (2i and pending flush memtables included). */
+    public final Gauge<Long> allMemtablesDataSize;
     /** Total number of columns present in the memtable. */
     public final Gauge<Long> memtableColumnsCount;
     /** Number of times flush has resulted in the memtable being switched out. */
@@ -49,9 +50,9 @@ public class ColumnFamilyMetrics
     public final Gauge<long[]> estimatedColumnCountHistogram;
     /** Histogram of the number of sstable data files accessed per read */
     public final Histogram sstablesPerReadHistogram;
-    /** Read metrics */
+    /** (Local) read metrics */
     public final LatencyMetrics readLatency;
-    /** Write metrics */
+    /** (Local) write metrics */
     public final LatencyMetrics writeLatency;
     /** Estimated number of tasks pending for this column family */
     public final Gauge<Integer> pendingTasks;
@@ -79,10 +80,19 @@ public class ColumnFamilyMetrics
     public final Gauge<Long> bloomFilterDiskSpaceUsed;
     /** Key cache hit rate  for this CF */
     public final Gauge<Double> keyCacheHitRate;
+    /** Tombstones scanned in queries on this CF */
+    public final Histogram tombstoneScannedHistogram;
+    /** Live cells scanned in queries on this CF */
+    public final Histogram liveScannedHistogram;
+    /** Disk space used by snapshot files which */
+    public final Gauge<Long> trueSnapshotsSize;
+
+    public final Timer coordinatorReadLatency;
+    public final Timer coordinatorScanLatency;
 
     private final MetricNameFactory factory;
 
-    public final Counter speculativeRetry;
+    public final Counter speculativeRetries;
 
     // for backward compatibility
     @Deprecated public final EstimatedHistogram sstablesPerRead = new EstimatedHistogram(35);
@@ -109,6 +119,13 @@ public class ColumnFamilyMetrics
             public Long value()
             {
                 return cfs.getDataTracker().getMemtable().getLiveSize();
+            }
+        });
+        allMemtablesDataSize = Metrics.newGauge(factory.createMetricName("AllMemtablesDataSize"), new Gauge<Long>()
+        {
+            public Long value()
+            {
+                return cfs.getTotalAllMemtablesLiveSize();
             }
         });
         memtableSwitchCount = Metrics.newCounter(factory.createMetricName("MemtableSwitchCount"));
@@ -140,7 +157,7 @@ public class ColumnFamilyMetrics
                 return histogram;
             }
         });
-        sstablesPerReadHistogram = Metrics.newHistogram(factory.createMetricName("SSTablesPerReadHistogram"));
+        sstablesPerReadHistogram = Metrics.newHistogram(factory.createMetricName("SSTablesPerReadHistogram"), true);
         compressionRatio = Metrics.newGauge(factory.createMetricName("CompressionRatio"), new Gauge<Double>()
         {
             public Double value()
@@ -149,13 +166,13 @@ public class ColumnFamilyMetrics
                 int total = 0;
                 for (SSTableReader sstable : cfs.getSSTables())
                 {
-                    if (sstable.getCompressionRatio() != SSTableMetadata.NO_COMPRESSION_RATIO)
+                    if (sstable.getCompressionRatio() != MetadataCollector.NO_COMPRESSION_RATIO)
                     {
                         sum += sstable.getCompressionRatio();
                         total++;
                     }
                 }
-                return total != 0 ? (double)sum/total: 0;
+                return total != 0 ? sum / total : 0;
             }
         });
         readLatency = new LatencyMetrics(factory, "Read");
@@ -232,7 +249,7 @@ public class ColumnFamilyMetrics
             public Long value()
             {
                 long count = 0L;
-                for (SSTableReader sstable: cfs.getSSTables())
+                for (SSTableReader sstable : cfs.getSSTables())
                     count += sstable.getRecentBloomFilterFalsePositiveCount();
                 return count;
             }
@@ -243,7 +260,7 @@ public class ColumnFamilyMetrics
             {
                 long falseCount = 0L;
                 long trueCount = 0L;
-                for (SSTableReader sstable: cfs.getSSTables())
+                for (SSTableReader sstable : cfs.getSSTables())
                 {
                     falseCount += sstable.getBloomFilterFalsePositiveCount();
                     trueCount += sstable.getBloomFilterTruePositiveCount();
@@ -279,7 +296,7 @@ public class ColumnFamilyMetrics
                 return total;
             }
         });
-        speculativeRetry = Metrics.newCounter(factory.createMetricName("SpeculativeRetry"));
+        speculativeRetries = Metrics.newCounter(factory.createMetricName("SpeculativeRetries"));
         keyCacheHitRate = Metrics.newGauge(factory.createMetricName("KeyCacheHitRate"), new RatioGauge()
         {
             protected double getNumerator()
@@ -296,6 +313,18 @@ public class ColumnFamilyMetrics
                 for (SSTableReader sstable : cfs.getSSTables())
                     requests += sstable.getKeyCacheRequest();
                 return Math.max(requests, 1); // to avoid NaN.
+            }
+        });
+        tombstoneScannedHistogram = Metrics.newHistogram(factory.createMetricName("TombstoneScannedHistogram"), true);
+        liveScannedHistogram = Metrics.newHistogram(factory.createMetricName("LiveScannedHistogram"), true);
+        coordinatorReadLatency = Metrics.newTimer(factory.createMetricName("CoordinatorReadLatency"), TimeUnit.MICROSECONDS, TimeUnit.SECONDS);
+        coordinatorScanLatency = Metrics.newTimer(factory.createMetricName("CoordinatorScanLatency"), TimeUnit.MICROSECONDS, TimeUnit.SECONDS);
+        
+        trueSnapshotsSize = Metrics.newGauge(factory.createMetricName("SnapshotsSize"), new Gauge<Long>()
+        {
+            public Long value()
+            {
+                return cfs.trueSnapshotsSize();
             }
         });
     }
@@ -335,6 +364,11 @@ public class ColumnFamilyMetrics
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("BloomFilterDiskSpaceUsed"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("KeyCacheHitRate"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("SpeculativeRetry"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("TombstoneScannedHistogram"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("LiveScannedHistogram"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("CoordinatorReadLatency"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("CoordinatorScanLatency"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("SnapshotsSize"));
     }
 
     class ColumnFamilyMetricNameFactory implements MetricNameFactory

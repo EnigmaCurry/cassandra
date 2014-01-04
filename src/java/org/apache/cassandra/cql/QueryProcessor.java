@@ -20,17 +20,24 @@ package org.apache.cassandra.cql;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.cassandra.serializers.MarshalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cli.CliUtils;
-import org.apache.cassandra.db.CounterColumn;
+import org.apache.cassandra.cql.hooks.ExecutionContext;
+import org.apache.cassandra.cql.hooks.PostPreparationHook;
+import org.apache.cassandra.cql.hooks.PreExecutionHook;
+import org.apache.cassandra.cql.hooks.PreparationContext;
+import org.apache.cassandra.db.CounterCell;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.composites.CellName;
+import org.apache.cassandra.db.composites.CellNameType;
+import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
@@ -39,6 +46,7 @@ import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.exceptions.*;
+import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.MigrationManager;
@@ -48,9 +56,6 @@ import org.apache.cassandra.thrift.CqlResult;
 import org.apache.cassandra.thrift.CqlResultType;
 import org.apache.cassandra.thrift.CqlRow;
 import org.apache.cassandra.thrift.CqlPreparedResult;
-import org.apache.cassandra.thrift.IndexExpression;
-import org.apache.cassandra.thrift.IndexOperator;
-import org.apache.cassandra.thrift.IndexType;
 import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.thrift.ThriftClientState;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -70,6 +75,29 @@ public class QueryProcessor
 
     public static final String DEFAULT_KEY_NAME = CFMetaData.DEFAULT_KEY_ALIAS.toUpperCase();
 
+    private static final List<PreExecutionHook> preExecutionHooks = new CopyOnWriteArrayList<>();
+    private static final List<PostPreparationHook> postPreparationHooks = new CopyOnWriteArrayList<>();
+
+    public static void addPreExecutionHook(PreExecutionHook hook)
+    {
+        preExecutionHooks.add(hook);
+    }
+
+    public static void removePreExecutionHook(PreExecutionHook hook)
+    {
+        preExecutionHooks.remove(hook);
+    }
+
+    public static void addPostPreparationHook(PostPreparationHook hook)
+    {
+        postPreparationHooks.add(hook);
+    }
+
+    public static void removePostPreparationHook(PostPreparationHook hook)
+    {
+        postPreparationHooks.remove(hook);
+    }
+
     private static List<org.apache.cassandra.db.Row> getSlice(CFMetaData metadata, SelectStatement select, List<ByteBuffer> variables, long now)
     throws InvalidRequestException, ReadTimeoutException, UnavailableException, IsBootstrappingException
     {
@@ -78,7 +106,7 @@ public class QueryProcessor
         // ...of a list of column names
         if (!select.isColumnRange())
         {
-            SortedSet<ByteBuffer> columnNames = getColumnNames(select, metadata, variables);
+            SortedSet<CellName> columnNames = getColumnNames(select, metadata, variables);
             validateColumnNames(columnNames);
 
             for (Term rawKey: select.getKeys())
@@ -92,9 +120,9 @@ public class QueryProcessor
         // ...a range (slice) of column names
         else
         {
-            AbstractType<?> comparator = select.getComparator(metadata.ksName);
-            ByteBuffer start = select.getColumnStart().getByteBuffer(comparator,variables);
-            ByteBuffer finish = select.getColumnFinish().getByteBuffer(comparator,variables);
+            AbstractType<?> at = metadata.comparator.asAbstractType();
+            Composite start = metadata.comparator.fromByteBuffer(select.getColumnStart().getByteBuffer(at,variables));
+            Composite finish = metadata.comparator.fromByteBuffer(select.getColumnFinish().getByteBuffer(at,variables));
 
             for (Term rawKey : select.getKeys())
             {
@@ -113,17 +141,17 @@ public class QueryProcessor
         return StorageProxy.read(commands, select.getConsistencyLevel());
     }
 
-    private static SortedSet<ByteBuffer> getColumnNames(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
+    private static SortedSet<CellName> getColumnNames(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
     throws InvalidRequestException
     {
         String keyString = metadata.getCQL2KeyName();
         List<Term> selectColumnNames = select.getColumnNames();
-        SortedSet<ByteBuffer> columnNames = new TreeSet<ByteBuffer>(metadata.comparator);
+        SortedSet<CellName> columnNames = new TreeSet<>(metadata.comparator);
         for (Term column : selectColumnNames)
         {
             // skip the key for the slice op; we'll add it to the resultset in extractThriftColumns
             if (!column.getText().equalsIgnoreCase(keyString))
-                columnNames.add(column.getByteBuffer(metadata.comparator,variables));
+                columnNames.add(metadata.comparator.cellFromByteBuffer(column.getByteBuffer(metadata.comparator.asAbstractType(),variables)));
         }
         return columnNames;
     }
@@ -161,11 +189,11 @@ public class QueryProcessor
         for (Relation columnRelation : columnRelations)
         {
             // Left and right side of relational expression encoded according to comparator/validator.
-            ByteBuffer entity = columnRelation.getEntity().getByteBuffer(metadata.comparator, variables);
-            ByteBuffer value = columnRelation.getValue().getByteBuffer(select.getValueValidator(metadata.ksName, entity), variables);
+            ByteBuffer entity = columnRelation.getEntity().getByteBuffer(metadata.comparator.asAbstractType(), variables);
+            ByteBuffer value = columnRelation.getValue().getByteBuffer(metadata.getValueValidatorForFullCellName(entity), variables);
 
             expressions.add(new IndexExpression(entity,
-                                                IndexOperator.valueOf(columnRelation.operator().toString()),
+                                                IndexExpression.Operator.valueOf(columnRelation.operator().toString()),
                                                 value));
         }
 
@@ -205,8 +233,9 @@ public class QueryProcessor
     {
         if (select.isColumnRange() || select.getColumnNames().size() == 0)
         {
-            return new SliceQueryFilter(select.getColumnStart().getByteBuffer(metadata.comparator, variables),
-                                        select.getColumnFinish().getByteBuffer(metadata.comparator, variables),
+            AbstractType<?> comparator = metadata.comparator.asAbstractType();
+            return new SliceQueryFilter(metadata.comparator.fromByteBuffer(select.getColumnStart().getByteBuffer(comparator, variables)),
+                                        metadata.comparator.fromByteBuffer(select.getColumnFinish().getByteBuffer(comparator, variables)),
                                         select.isColumnsReversed(),
                                         select.getColumnsLimit());
         }
@@ -239,12 +268,14 @@ public class QueryProcessor
 
         if (select.getColumnRelations().size() > 0)
         {
-            AbstractType<?> comparator = select.getComparator(keyspace);
-            SecondaryIndexManager idxManager = Keyspace.open(keyspace).getColumnFamilyStore(select.getColumnFamily()).indexManager;
+            ColumnFamilyStore cfstore = Keyspace.open(keyspace).getColumnFamilyStore(select.getColumnFamily());
+            CellNameType comparator = cfstore.metadata.comparator;
+            AbstractType<?> at = comparator.asAbstractType();
+            SecondaryIndexManager idxManager = cfstore.indexManager;
             for (Relation relation : select.getColumnRelations())
             {
-                ByteBuffer name = relation.getEntity().getByteBuffer(comparator, variables);
-                if ((relation.operator() == RelationType.EQ) && idxManager.indexes(name))
+                ByteBuffer name = relation.getEntity().getByteBuffer(at, variables);
+                if ((relation.operator() == RelationType.EQ) && idxManager.indexes(comparator.cellFromByteBuffer(name)))
                     return;
             }
             throw new InvalidRequestException("No indexed columns present in by-columns clause with \"equals\" operator");
@@ -274,27 +305,27 @@ public class QueryProcessor
             throw new InvalidRequestException(String.format("Expected key '%s' to be present in WHERE clause for '%s'", realKeyAlias, cfm.cfName));
     }
 
-    private static void validateColumnNames(Iterable<ByteBuffer> columns)
+    private static void validateColumnNames(Iterable<CellName> columns)
     throws InvalidRequestException
     {
-        for (ByteBuffer name : columns)
+        for (CellName name : columns)
         {
-            if (name.remaining() > org.apache.cassandra.db.Column.MAX_NAME_LENGTH)
+            if (name.dataSize() > org.apache.cassandra.db.Cell.MAX_NAME_LENGTH)
                 throw new InvalidRequestException(String.format("column name is too long (%s > %s)",
-                                                                name.remaining(),
-                                                                org.apache.cassandra.db.Column.MAX_NAME_LENGTH));
-            if (name.remaining() == 0)
+                                                                name.dataSize(),
+                                                                org.apache.cassandra.db.Cell.MAX_NAME_LENGTH));
+            if (name.isEmpty())
                 throw new InvalidRequestException("zero-length column name");
         }
     }
 
-    public static void validateColumnName(ByteBuffer column)
+    public static void validateColumnName(CellName column)
     throws InvalidRequestException
     {
         validateColumnNames(Arrays.asList(column));
     }
 
-    public static void validateColumn(CFMetaData metadata, ByteBuffer name, ByteBuffer value)
+    public static void validateColumn(CFMetaData metadata, CellName name, ByteBuffer value)
     throws InvalidRequestException
     {
         validateColumnName(name);
@@ -308,7 +339,7 @@ public class QueryProcessor
         catch (MarshalException me)
         {
             throw new InvalidRequestException(String.format("Invalid column value for column (name=%s); %s",
-                                                            ByteBufferUtil.bytesToHex(name),
+                                                            ByteBufferUtil.bytesToHex(name.toByteBuffer()),
                                                             me.getMessage()));
         }
     }
@@ -328,25 +359,31 @@ public class QueryProcessor
         validateSliceFilter(metadata, range.start(), range.finish(), range.reversed);
     }
 
-    private static void validateSliceFilter(CFMetaData metadata, ByteBuffer start, ByteBuffer finish, boolean reversed)
+    private static void validateSliceFilter(CFMetaData metadata, Composite start, Composite finish, boolean reversed)
     throws InvalidRequestException
     {
-        AbstractType<?> comparator = metadata.comparator;
-        Comparator<ByteBuffer> orderedComparator = reversed ? comparator.reverseComparator: comparator;
-        if (start.remaining() > 0 && finish.remaining() > 0 && orderedComparator.compare(start, finish) > 0)
+        CellNameType comparator = metadata.comparator;
+        Comparator<Composite> orderedComparator = reversed ? comparator.reverseComparator(): comparator;
+        if (!start.isEmpty() && !finish.isEmpty() && orderedComparator.compare(start, finish) > 0)
             throw new InvalidRequestException("range finish must come after start in traversal order");
     }
 
-    public static CqlResult processStatement(CQLStatement statement,ThriftClientState clientState, List<ByteBuffer> variables )
+    public static CqlResult processStatement(CQLStatement statement, ExecutionContext context)
     throws RequestExecutionException, RequestValidationException
     {
         String keyspace = null;
+        ThriftClientState clientState = context.clientState;
+        List<ByteBuffer> variables = context.variables;
 
         // Some statements won't have (or don't need) a keyspace (think USE, or CREATE).
         if (statement.type != StatementType.SELECT && StatementType.REQUIRES_KEYSPACE.contains(statement.type))
             keyspace = clientState.getKeyspace();
 
         CqlResult result = new CqlResult();
+
+        if (!preExecutionHooks.isEmpty())
+            for (PreExecutionHook hook : preExecutionHooks)
+                statement = hook.processStatement(statement, context);
 
         if (logger.isDebugEnabled()) logger.debug("CQL statement type: {}", statement.type.toString());
         CFMetaData metadata;
@@ -410,7 +447,7 @@ public class QueryProcessor
                 // otherwise create resultset from query results
                 result.schema = new CqlMetadata(new HashMap<ByteBuffer, String>(),
                                                 new HashMap<ByteBuffer, String>(),
-                                                TypeParser.getShortName(metadata.comparator),
+                                                TypeParser.getShortName(metadata.comparator.asAbstractType()),
                                                 TypeParser.getShortName(metadata.getDefaultValidator()));
                 List<CqlRow> cqlRows = new ArrayList<CqlRow>(rows.size());
                 for (org.apache.cassandra.db.Row row : rows)
@@ -430,14 +467,14 @@ public class QueryProcessor
                         // preserve comparator order
                         if (row.cf != null)
                         {
-                            for (org.apache.cassandra.db.Column c : row.cf.getSortedColumns())
+                            for (org.apache.cassandra.db.Cell c : row.cf.getSortedColumns())
                             {
                                 if (c.isMarkedForDelete(now))
                                     continue;
 
-                                ColumnDefinition cd = metadata.getColumnDefinitionFromColumnName(c.name());
+                                ColumnDefinition cd = metadata.getColumnDefinition(c.name());
                                 if (cd != null)
-                                    result.schema.value_types.put(c.name(), TypeParser.getShortName(cd.getValidator()));
+                                    result.schema.value_types.put(c.name().toByteBuffer(), TypeParser.getShortName(cd.type));
 
                                 thriftColumns.add(thriftify(c));
                             }
@@ -463,22 +500,23 @@ public class QueryProcessor
                             if (row.cf == null)
                                 continue;
 
-                            ByteBuffer name;
+                            ByteBuffer nameBytes;
                             try
                             {
-                                name = term.getByteBuffer(metadata.comparator, variables);
+                                nameBytes = term.getByteBuffer(metadata.comparator.asAbstractType(), variables);
                             }
                             catch (InvalidRequestException e)
                             {
                                 throw new AssertionError(e);
                             }
 
-                            ColumnDefinition cd = metadata.getColumnDefinitionFromColumnName(name);
+                            CellName name = metadata.comparator.cellFromByteBuffer(nameBytes);
+                            ColumnDefinition cd = metadata.getColumnDefinition(name);
                             if (cd != null)
-                                result.schema.value_types.put(name, TypeParser.getShortName(cd.getValidator()));
-                            org.apache.cassandra.db.Column c = row.cf.getColumn(name);
-                            if (c == null || c.isMarkedForDelete(now))
-                                thriftColumns.add(new Column().setName(name));
+                                result.schema.value_types.put(nameBytes, TypeParser.getShortName(cd.type));
+                            org.apache.cassandra.db.Cell c = row.cf.getColumn(name);
+                            if (c == null || c.isMarkedForDelete(System.currentTimeMillis()))
+                                thriftColumns.add(new Column().setName(nameBytes));
                             else
                                 thriftColumns.add(thriftify(c));
                         }
@@ -646,12 +684,12 @@ public class QueryProcessor
                 CFMetaData cfm = oldCfm.clone();
                 for (ColumnDefinition cd : cfm.regularColumns())
                 {
-                    if (cd.name.equals(columnName))
+                    if (cd.name.bytes.equals(columnName))
                     {
                         if (cd.getIndexType() != null)
                             throw new InvalidRequestException("Index already exists");
                         if (logger.isDebugEnabled())
-                            logger.debug("Updating column {} definition for index {}", cfm.comparator.getString(columnName), createIdx.getIndexName());
+                            logger.debug("Updating column {} definition for index {}", cfm.comparator.getString(cfm.comparator.fromByteBuffer(columnName)), createIdx.getIndexName());
                         cd.setIndexType(IndexType.KEYS, Collections.<String, String>emptyMap());
                         cd.setIndexName(createIdx.getIndexName());
                         columnExists = true;
@@ -659,7 +697,7 @@ public class QueryProcessor
                     }
                 }
                 if (!columnExists)
-                    throw new InvalidRequestException("No column definition found for column " + oldCfm.comparator.getString(columnName));
+                    throw new InvalidRequestException("No column definition found for column " + oldCfm.comparator.getString(cfm.comparator.fromByteBuffer(columnName)));
 
                 try
                 {
@@ -761,11 +799,12 @@ public class QueryProcessor
     throws RequestValidationException, RequestExecutionException
     {
         logger.trace("CQL QUERY: {}", queryString);
-        return processStatement(getStatement(queryString), clientState, new ArrayList<ByteBuffer>(0));
+        return processStatement(getStatement(queryString),
+                                new ExecutionContext(clientState, queryString, Collections.<ByteBuffer>emptyList()));
     }
 
     public static CqlPreparedResult prepare(String queryString, ThriftClientState clientState)
-    throws SyntaxException
+    throws RequestValidationException
     {
         logger.trace("CQL QUERY: {}", queryString);
 
@@ -777,6 +816,13 @@ public class QueryProcessor
         logger.trace(String.format("Stored prepared statement #%d with %d bind markers",
                                    statementId,
                                    statement.boundTerms));
+
+        if (!postPreparationHooks.isEmpty())
+        {
+            PreparationContext context = new PreparationContext(clientState, queryString, statement);
+            for (PostPreparationHook hook : postPreparationHooks)
+                hook.processStatement(statement, context);
+        }
 
         return new CqlPreparedResult(statementId, statement.boundTerms);
     }
@@ -799,7 +845,7 @@ public class QueryProcessor
                     logger.trace("[{}] '{}'", i+1, variables.get(i));
         }
 
-        return processStatement(statement, clientState, variables);
+        return processStatement(statement, new ExecutionContext(clientState, null, variables));
     }
 
     private static final int makeStatementId(String cql)
@@ -808,12 +854,12 @@ public class QueryProcessor
         return cql.hashCode();
     }
 
-    private static Column thriftify(org.apache.cassandra.db.Column c)
+    private static Column thriftify(org.apache.cassandra.db.Cell c)
     {
-        ByteBuffer value = (c instanceof CounterColumn)
+        ByteBuffer value = (c instanceof CounterCell)
                            ? ByteBufferUtil.bytes(CounterContext.instance().total(c.value()))
                            : c.value();
-        return new Column(c.name()).setValue(value).setTimestamp(c.timestamp());
+        return new Column(c.name().toByteBuffer()).setValue(value).setTimestamp(c.timestamp());
     }
 
     private static CQLStatement getStatement(String queryStr) throws SyntaxException

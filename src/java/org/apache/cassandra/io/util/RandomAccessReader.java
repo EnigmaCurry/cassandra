@@ -152,6 +152,11 @@ public class RandomAccessReader extends RandomAccessFile implements FileDataInpu
         return filePath;
     }
 
+    public int getTotalBufferSize()
+    {
+        return buffer.length;
+    }
+
     public void reset()
     {
         seek(markedPointer);
@@ -358,6 +363,11 @@ public class RandomAccessReader extends RandomAccessFile implements FileDataInpu
     public long length()
     {
         return fileLength;
+    }
+
+    public long getPosition()
+    {
+        return current;
     }
 
     @Override

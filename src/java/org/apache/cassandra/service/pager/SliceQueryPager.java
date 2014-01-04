@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.exceptions.RequestExecutionException;
@@ -34,7 +35,7 @@ public class SliceQueryPager extends AbstractQueryPager implements SinglePartiti
 {
     private final SliceFromReadCommand command;
 
-    private volatile ByteBuffer lastReturned;
+    private volatile CellName lastReturned;
 
     // Don't use directly, use QueryPagers method instead
     SliceQueryPager(SliceFromReadCommand command, ConsistencyLevel consistencyLevel, boolean localQuery)
@@ -49,16 +50,21 @@ public class SliceQueryPager extends AbstractQueryPager implements SinglePartiti
 
         if (state != null)
         {
-            lastReturned = state.cellName;
+            lastReturned = cfm.comparator.cellFromByteBuffer(state.cellName);
             restoreState(state.remaining, true);
         }
+    }
+
+    public ByteBuffer key()
+    {
+        return command.key;
     }
 
     public PagingState state()
     {
         return lastReturned == null
              ? null
-             : new PagingState(null, lastReturned, maxRemaining());
+             : new PagingState(null, lastReturned.toByteBuffer(), maxRemaining());
     }
 
     protected List<Row> queryNextPage(int pageSize, ConsistencyLevel consistencyLevel, boolean localQuery)
@@ -76,12 +82,17 @@ public class SliceQueryPager extends AbstractQueryPager implements SinglePartiti
 
     protected boolean containsPreviousLast(Row first)
     {
-        return lastReturned != null && lastReturned.equals(firstName(first.cf));
+        return lastReturned != null && lastReturned.equals(isReversed() ? lastName(first.cf) : firstName(first.cf));
     }
 
     protected boolean recordLast(Row last)
     {
-        lastReturned = lastName(last.cf);
+        lastReturned = isReversed() ? firstName(last.cf) : lastName(last.cf);
         return true;
+    }
+
+    protected boolean isReversed()
+    {
+        return command.filter.reversed;
     }
 }

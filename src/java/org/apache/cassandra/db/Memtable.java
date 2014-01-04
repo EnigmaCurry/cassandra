@@ -28,17 +28,16 @@ import org.cliffc.high_scale_lib.NonBlockingHashSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.composites.CellNameType;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.io.sstable.SSTableMetadata;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableWriter;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DiskAwareRunnable;
 import org.apache.cassandra.utils.Allocator;
 import org.github.jamm.MemoryMeter;
@@ -72,30 +71,21 @@ public class Memtable
     // max liveratio seen w/ 1-byte columns on a 64-bit jvm was 19. If it gets higher than 64 something is probably broken.
     private static final double MAX_SANE_LIVE_RATIO = 64.0;
 
-    // we want to limit the amount of concurrently running and/or queued meterings, because counting is slow (can be
-    // minutes, for a large memtable and a busy server). so we could keep memtables
-    // alive after they're flushed and would otherwise be GC'd. the approach we take is to bound the number of
-    // outstanding/running meterings to a maximum of one per CFS using this set; the executor's queue is unbounded but
-    // will implicitly be bounded by the number of CFS:s.
+    // We need to take steps to avoid retaining inactive membtables in memory, because counting is slow (can be
+    // minutes, for a large memtable and a busy server).  A strictly FIFO Memtable queue could keep memtables
+    // alive waiting for metering after they're flushed and would otherwise be GC'd.  Instead, the approach we take
+    // is to enqueue the CFS instead of the memtable, and to meter whatever the active memtable is when the executor
+    // starts to work on it.  We use a Set to make sure we don't enqueue redundant tasks for the same CFS.
     private static final Set<ColumnFamilyStore> meteringInProgress = new NonBlockingHashSet<ColumnFamilyStore>();
-    private static final ExecutorService meterExecutor = new DebuggableThreadPoolExecutor(1,
-                                                                                          1,
+    private static final ExecutorService meterExecutor = new JMXEnabledThreadPoolExecutor(1,
                                                                                           Integer.MAX_VALUE,
                                                                                           TimeUnit.MILLISECONDS,
                                                                                           new LinkedBlockingQueue<Runnable>(),
-                                                                                          new NamedThreadFactory("MemoryMeter"))
-    {
-        @Override
-        protected void afterExecute(Runnable r, Throwable t)
-        {
-            super.afterExecute(r, t);
-            DebuggableThreadPoolExecutor.logExceptionsAfterExecute(r, t);
-        }
-    };
-
+                                                                                          new NamedThreadFactory("MemoryMeter"),
+                                                                                          "internal");
     private final MemoryMeter meter;
 
-    volatile static Memtable activelyMeasuring;
+    volatile static ColumnFamilyStore activelyMeasuring;
 
     private final AtomicLong currentSize = new AtomicLong(0);
     private final AtomicLong currentOperations = new AtomicLong(0);
@@ -103,16 +93,16 @@ public class Memtable
     // We index the memtable by RowPosition only for the purpose of being able
     // to select key range using Token.KeyBound. However put() ensures that we
     // actually only store DecoratedKey.
-    private final ConcurrentNavigableMap<RowPosition, AtomicSortedColumns> rows = new ConcurrentSkipListMap<RowPosition, AtomicSortedColumns>();
+    private final ConcurrentNavigableMap<RowPosition, AtomicBTreeColumns> rows = new ConcurrentSkipListMap<>();
     public final ColumnFamilyStore cfs;
     private final long creationTime = System.currentTimeMillis();
     private final long creationNano = System.nanoTime();
 
     private final Allocator allocator = DatabaseDescriptor.getMemtableAllocator();
     // We really only need one column by allocator but one by memtable is not a big waste and avoids needing allocators to know about CFS
-    private final Function<Column, Column> localCopyFunction = new Function<Column, Column>()
+    private final Function<Cell, Cell> localCopyFunction = new Function<Cell, Cell>()
     {
-        public Column apply(Column c)
+        public Cell apply(Cell c)
         {
             return c.localCopy(cfs, allocator);
         }
@@ -121,7 +111,7 @@ public class Memtable
     // Record the comparator of the CFS at the creation of the memtable. This
     // is only used when a user update the CF comparator, to know if the
     // memtable was created with the new or old comparator.
-    public final AbstractType initialComparator;
+    public final CellNameType initialComparator;
 
     public Memtable(ColumnFamilyStore cfs)
     {
@@ -146,11 +136,9 @@ public class Memtable
     {
         long estimatedSize = (long) (currentSize.get() * cfs.liveRatio);
 
-        // cap the estimate at both ends by what the allocator can tell us
+        // liveRatio is just an estimate; we can get a lower bound directly from the allocator
         if (estimatedSize < allocator.getMinimumSize())
             return allocator.getMinimumSize();
-        if (estimatedSize > allocator.getMaximumSize())
-            return allocator.getMaximumSize();
 
         return estimatedSize;
     }
@@ -175,8 +163,9 @@ public class Memtable
         if (!MemoryMeter.isInitialized())
         {
             // hack for openjdk.  we log a warning about this in the startup script too.
-            logger.warn("MemoryMeter uninitialized (jamm not specified as java agent); assuming liveRatio of 10.0.  Usually this means cassandra-env.sh disabled jamm because you are using a buggy JRE; upgrade to the Sun JRE instead");
-            cfs.liveRatio = 10.0;
+            logger.error("MemoryMeter uninitialized (jamm not specified as java agent); assuming liveRatio of {}.  "
+                         + " Usually this means cassandra-env.sh disabled jamm because you are using a buggy JRE; "
+                         + " upgrade to the Sun JRE instead", cfs.liveRatio);
             return;
         }
 
@@ -186,65 +175,16 @@ public class Memtable
             return;
         }
 
-        Runnable runnable = new Runnable()
-        {
-            public void run()
-            {
-                try
-                {
-                    activelyMeasuring = Memtable.this;
-
-                    long start = System.nanoTime();
-                    // ConcurrentSkipListMap has cycles, so measureDeep will have to track a reference to EACH object it visits.
-                    // So to reduce the memory overhead of doing a measurement, we break it up to row-at-a-time.
-                    long deepSize = meter.measure(rows);
-                    int objects = 0;
-                    for (Map.Entry<RowPosition, AtomicSortedColumns> entry : rows.entrySet())
-                    {
-                        deepSize += meter.measureDeep(entry.getKey()) + meter.measureDeep(entry.getValue());
-                        objects += entry.getValue().getColumnCount();
-                    }
-                    double newRatio = (double) deepSize / currentSize.get();
-
-                    if (newRatio < MIN_SANE_LIVE_RATIO)
-                    {
-                        logger.warn("setting live ratio to minimum of {} instead of {}", MIN_SANE_LIVE_RATIO, newRatio);
-                        newRatio = MIN_SANE_LIVE_RATIO;
-                    }
-                    if (newRatio > MAX_SANE_LIVE_RATIO)
-                    {
-                        logger.warn("setting live ratio to maximum of {} instead of {}", MAX_SANE_LIVE_RATIO, newRatio);
-                        newRatio = MAX_SANE_LIVE_RATIO;
-                    }
-
-                    // we want to be very conservative about our estimate, since the penalty for guessing low is OOM
-                    // death.  thus, higher estimates are believed immediately; lower ones are averaged w/ the old
-                    if (newRatio > cfs.liveRatio)
-                        cfs.liveRatio = newRatio;
-                    else
-                        cfs.liveRatio = (cfs.liveRatio + newRatio) / 2.0;
-
-                    logger.info("{} liveRatio is {} (just-counted was {}).  calculation took {}ms for {} columns",
-                                cfs, cfs.liveRatio, newRatio, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), objects);
-                    activelyMeasuring = null;
-                }
-                finally
-                {
-                    meteringInProgress.remove(cfs);
-                }
-            }
-        };
-
-        meterExecutor.submit(runnable);
+        meterExecutor.submit(new MeteringRunnable(cfs));
     }
 
     private void resolve(DecoratedKey key, ColumnFamily cf, SecondaryIndexManager.Updater indexer)
     {
-        AtomicSortedColumns previous = rows.get(key);
+        AtomicBTreeColumns previous = rows.get(key);
 
         if (previous == null)
         {
-            AtomicSortedColumns empty = cf.cloneMeShallow(AtomicSortedColumns.factory, false);
+            AtomicBTreeColumns empty = cf.cloneMeShallow(AtomicBTreeColumns.factory, false);
             // We'll add the columns later. This avoids wasting works if we get beaten in the putIfAbsent
             previous = rows.putIfAbsent(new DecoratedKey(key.token, allocator.clone(key.key)), empty);
             if (previous == null)
@@ -263,7 +203,7 @@ public class Memtable
     {
         StringBuilder builder = new StringBuilder();
         builder.append("{");
-        for (Map.Entry<RowPosition, AtomicSortedColumns> entry : rows.entrySet())
+        for (Map.Entry<RowPosition, AtomicBTreeColumns> entry : rows.entrySet())
         {
             builder.append(entry.getKey()).append(": ").append(entry.getValue()).append(", ");
         }
@@ -286,31 +226,36 @@ public class Memtable
      * @param startWith Include data in the result from and including this key and to the end of the memtable
      * @return An iterator of entries with the data from the start key
      */
-    public Iterator<Map.Entry<DecoratedKey, AtomicSortedColumns>> getEntryIterator(final RowPosition startWith, final RowPosition stopAt)
+    public Iterator<Map.Entry<DecoratedKey, AtomicBTreeColumns>> getEntryIterator(final RowPosition startWith, final RowPosition stopAt)
     {
-        return new Iterator<Map.Entry<DecoratedKey, AtomicSortedColumns>>()
+        return new Iterator<Map.Entry<DecoratedKey, AtomicBTreeColumns>>()
         {
-            private Iterator<Map.Entry<RowPosition, AtomicSortedColumns>> iter = stopAt.isMinimum(cfs.partitioner)
-                                                                               ? rows.tailMap(startWith).entrySet().iterator()
-                                                                               : rows.subMap(startWith, true, stopAt, true).entrySet().iterator();
+            private Iterator<? extends Map.Entry<RowPosition, AtomicBTreeColumns>> iter = stopAt.isMinimum(cfs.partitioner)
+                                                                                        ? rows.tailMap(startWith).entrySet().iterator()
+                                                                                        : rows.subMap(startWith, true, stopAt, true).entrySet().iterator();
+            private Map.Entry<RowPosition, AtomicBTreeColumns> currentEntry;
 
             public boolean hasNext()
             {
                 return iter.hasNext();
             }
 
-            public Map.Entry<DecoratedKey, AtomicSortedColumns> next()
+            public Map.Entry<DecoratedKey, AtomicBTreeColumns> next()
             {
-                Map.Entry<RowPosition, AtomicSortedColumns> entry = iter.next();
+                Map.Entry<RowPosition, AtomicBTreeColumns> entry = iter.next();
+                // Store the reference to the current entry so that remove() can update the current size.
+                currentEntry = entry;
                 // Actual stored key should be true DecoratedKey
                 assert entry.getKey() instanceof DecoratedKey;
                 // Object cast is required since otherwise we can't turn RowPosition into DecoratedKey
-                return (Map.Entry<DecoratedKey, AtomicSortedColumns>) (Object)entry;
+                return (Map.Entry<DecoratedKey, AtomicBTreeColumns>) (Object)entry;
             }
 
             public void remove()
             {
                 iter.remove();
+                currentSize.addAndGet(-currentEntry.getValue().dataSize());
+                currentEntry = null;
             }
         };
     }
@@ -385,7 +330,7 @@ public class Memtable
         private SSTableReader writeSortedContents(Future<ReplayPosition> context, File sstableDirectory)
         throws ExecutionException, InterruptedException
         {
-            logger.info("Writing " + Memtable.this.toString());
+            logger.info("Writing {}", Memtable.this.toString());
 
             SSTableReader ssTable;
             // errors when creating the writer that may leave empty temp files.
@@ -394,7 +339,7 @@ public class Memtable
             {
                 // (we can't clear out the map as-we-go to free up memory,
                 //  since the memtable is being used for queries in the "pending flush" category)
-                for (Map.Entry<RowPosition, AtomicSortedColumns> entry : rows.entrySet())
+                for (Map.Entry<RowPosition, AtomicBTreeColumns> entry : rows.entrySet())
                 {
                     ColumnFamily cf = entry.getValue();
                     if (cf.isMarkedForDelete())
@@ -406,14 +351,10 @@ public class Memtable
                         // See CASSANDRA-4667.
                         if (cfs.name.equals(SystemKeyspace.BATCHLOG_CF) && cfs.keyspace.getName().equals(Keyspace.SYSTEM_KS) && !(cf.getColumnCount() == 0))
                             continue;
-
-                        // Pedantically, you could purge column level tombstones that are past GcGRace when writing to the SSTable.
-                        // But it can result in unexpected behaviour where deletes never make it to disk,
-                        // as they are lost and so cannot override existing column values. So we only remove deleted columns if there
-                        // is a CF level tombstone to ensure the delete makes it into an SSTable.
-                        ColumnFamilyStore.removeDeletedColumnsOnly(cf, Integer.MIN_VALUE);
                     }
-                    writer.append((DecoratedKey)entry.getKey(), cf);
+
+                    if (cf.getColumnCount() > 0 || cf.isMarkedForDelete())
+                        writer.append((DecoratedKey)entry.getKey(), cf);
                 }
 
                 if (writer.getFilePointer() > 0)
@@ -440,12 +381,71 @@ public class Memtable
 
         public SSTableWriter createFlushWriter(String filename) throws ExecutionException, InterruptedException
         {
-            SSTableMetadata.Collector sstableMetadataCollector = SSTableMetadata.createCollector(cfs.metadata.comparator).replayPosition(context.get());
+            MetadataCollector sstableMetadataCollector = new MetadataCollector(cfs.metadata.comparator).replayPosition(context.get());
             return new SSTableWriter(filename,
                                      rows.size(),
                                      cfs.metadata,
                                      cfs.partitioner,
                                      sstableMetadataCollector);
+        }
+    }
+
+    private static class MeteringRunnable implements Runnable
+    {
+        // we might need to wait in the meter queue for a while.  measure whichever memtable is active at that point,
+        // rather than keeping the original memtable referenced (and thus un-freeable) until this runs.
+        private final ColumnFamilyStore cfs;
+
+        public MeteringRunnable(ColumnFamilyStore cfs)
+        {
+            this.cfs = cfs;
+        }
+
+        public void run()
+        {
+            try
+            {
+                activelyMeasuring = cfs;
+                Memtable memtable = cfs.getMemtableThreadSafe();
+
+                long start = System.nanoTime();
+                // ConcurrentSkipListMap has cycles, so measureDeep will have to track a reference to EACH object it visits.
+                // So to reduce the memory overhead of doing a measurement, we break it up to row-at-a-time.
+                long deepSize = memtable.meter.measure(memtable.rows);
+                int objects = 0;
+                for (Map.Entry<RowPosition, AtomicBTreeColumns> entry : memtable.rows.entrySet())
+                {
+                    deepSize += memtable.meter.measureDeep(entry.getKey()) + memtable.meter.measureDeep(entry.getValue());
+                    objects += entry.getValue().getColumnCount();
+                }
+                double newRatio = (double) deepSize / memtable.currentSize.get();
+
+                if (newRatio < MIN_SANE_LIVE_RATIO)
+                {
+                    logger.debug("setting live ratio to minimum of {} instead of {}", MIN_SANE_LIVE_RATIO, newRatio);
+                    newRatio = MIN_SANE_LIVE_RATIO;
+                }
+                if (newRatio > MAX_SANE_LIVE_RATIO)
+                {
+                    logger.warn("setting live ratio to maximum of {} instead of {}", MAX_SANE_LIVE_RATIO, newRatio);
+                    newRatio = MAX_SANE_LIVE_RATIO;
+                }
+
+                // we want to be very conservative about our estimate, since the penalty for guessing low is OOM
+                // death.  thus, higher estimates are believed immediately; lower ones are averaged w/ the old
+                if (newRatio > cfs.liveRatio)
+                    cfs.liveRatio = newRatio;
+                else
+                    cfs.liveRatio = (cfs.liveRatio + newRatio) / 2.0;
+
+                logger.info("{} liveRatio is {} (just-counted was {}).  calculation took {}ms for {} cells",
+                            cfs, cfs.liveRatio, newRatio, TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start), objects);
+            }
+            finally
+            {
+                activelyMeasuring = null;
+                meteringInProgress.remove(cfs);
+            }
         }
     }
 }

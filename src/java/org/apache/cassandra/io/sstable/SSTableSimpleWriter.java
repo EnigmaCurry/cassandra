@@ -56,8 +56,7 @@ public class SSTableSimpleWriter extends AbstractSSTableSimpleWriter
                                AbstractType<?> comparator,
                                AbstractType<?> subComparator)
     {
-        this(directory,
-             new CFMetaData(keyspace, columnFamily, subComparator == null ? ColumnFamilyType.Standard : ColumnFamilyType.Super, comparator, subComparator), partitioner);
+        this(directory, CFMetaData.denseCFMetaData(keyspace, columnFamily, comparator, subComparator), partitioner);
     }
 
     public SSTableSimpleWriter(File directory, CFMetaData metadata, IPartitioner partitioner)
@@ -72,7 +71,7 @@ public class SSTableSimpleWriter extends AbstractSSTableSimpleWriter
         {
             if (currentKey != null)
                 writeRow(currentKey, columnFamily);
-            writer.closeAndOpenReader();
+            writer.close();
         }
         catch (FSError e)
         {

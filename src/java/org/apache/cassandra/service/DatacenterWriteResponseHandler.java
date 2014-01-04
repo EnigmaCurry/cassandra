@@ -42,7 +42,7 @@ public class DatacenterWriteResponseHandler extends WriteResponseHandler
                                           WriteType writeType)
     {
         super(naturalEndpoints, pendingEndpoints, consistencyLevel, keyspace, callback, writeType);
-        assert consistencyLevel == ConsistencyLevel.LOCAL_QUORUM;
+        assert consistencyLevel.isDatacenterLocal();
     }
 
     @Override
@@ -50,8 +50,7 @@ public class DatacenterWriteResponseHandler extends WriteResponseHandler
     {
         if (message == null || DatabaseDescriptor.getLocalDataCenter().equals(snitch.getDatacenter(message.from)))
         {
-            if (responses.decrementAndGet() == 0)
-                signal();
+            super.response(message);
         }
     }
 }

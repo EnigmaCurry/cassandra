@@ -73,7 +73,7 @@ public class PropertyFileSnitch extends AbstractNetworkTopologySnitch
         }
         catch (ConfigurationException ex)
         {
-            logger.debug(SNITCH_PROPERTIES_FILENAME + " found, but does not look like a plain file. Will not watch it for changes");
+            logger.debug("{} found, but does not look like a plain file. Will not watch it for changes", SNITCH_PROPERTIES_FILENAME);
         }
     }
 
@@ -188,7 +188,7 @@ public class PropertyFileSnitch extends AbstractNetworkTopologySnitch
         logger.debug("loaded network topology {}", FBUtilities.toString(reloadedMap));
         endpointMap = reloadedMap;
         if (StorageService.instance != null) // null check tolerates circular dependency; see CASSANDRA-4145
-            StorageService.instance.getTokenMetadata().invalidateCaches();
+            StorageService.instance.getTokenMetadata().invalidateCachedRings();
 
         if (gossipStarted)
             StorageService.instance.gossipSnitchInfo();

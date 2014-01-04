@@ -17,7 +17,7 @@
  */
 package org.apache.cassandra.auth;
 
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -107,10 +107,10 @@ public class PasswordAuthenticator implements ISaslAwareAuthenticator
         UntypedResultSet result;
         try
         {
-            ResultMessage.Rows rows = authenticateStatement.execute(new QueryState(new ClientState(true)),
+            ResultMessage.Rows rows = authenticateStatement.execute(QueryState.forInternalCalls(),
                                                                     new QueryOptions(consistencyForUser(username),
                                                                                      Lists.newArrayList(ByteBufferUtil.bytes(username))));
-            result = new UntypedResultSet(rows.result);
+            result = UntypedResultSet.create(rows.result);
         }
         catch (RequestValidationException e)
         {
@@ -225,8 +225,8 @@ public class PasswordAuthenticator implements ISaslAwareAuthenticator
     {
         try
         {
-            // insert a default superuser if AUTH_KS.CREDENTIALS_CF is empty.
-            if (process(String.format("SELECT * FROM %s.%s", Auth.AUTH_KS, CREDENTIALS_CF), ConsistencyLevel.QUORUM).isEmpty())
+            // insert the default superuser if AUTH_KS.CREDENTIALS_CF is empty.
+            if (!hasExistingUsers())
             {
                 process(String.format("INSERT INTO %s.%s (username, salted_hash) VALUES ('%s', '%s') USING TIMESTAMP 0",
                                       Auth.AUTH_KS,
@@ -241,6 +241,14 @@ public class PasswordAuthenticator implements ISaslAwareAuthenticator
         {
             logger.warn("PasswordAuthenticator skipped default user setup: some nodes were not ready");
         }
+    }
+
+    private static boolean hasExistingUsers() throws RequestExecutionException
+    {
+        // Try looking up the 'cassandra' default user first, to avoid the range query if possible.
+        String defaultSUQuery = String.format("SELECT * FROM %s.%s WHERE username = '%s'", Auth.AUTH_KS, CREDENTIALS_CF, DEFAULT_USER_NAME);
+        String allUsersQuery = String.format("SELECT * FROM %s.%s LIMIT 1", Auth.AUTH_KS, CREDENTIALS_CF);
+        return !process(defaultSUQuery, ConsistencyLevel.QUORUM).isEmpty() || !process(allUsersQuery, ConsistencyLevel.QUORUM).isEmpty();
     }
 
     private static String hashpw(String password)
@@ -269,7 +277,6 @@ public class PasswordAuthenticator implements ISaslAwareAuthenticator
     private class PlainTextSaslAuthenticator implements ISaslAwareAuthenticator.SaslAuthenticator
     {
         private static final byte NUL = 0;
-        private final Charset UTF8_CHARSET = Charset.forName("UTF-8");
 
         private boolean complete = false;
         private Map<String, String> credentials;
@@ -331,8 +338,8 @@ public class PasswordAuthenticator implements ISaslAwareAuthenticator
                 throw new AuthenticationException("Password must not be null");
 
             Map<String, String> credentials = new HashMap<String, String>();
-            credentials.put(IAuthenticator.USERNAME_KEY, new String(user, UTF8_CHARSET));
-            credentials.put(IAuthenticator.PASSWORD_KEY, new String(pass, UTF8_CHARSET));
+            credentials.put(IAuthenticator.USERNAME_KEY, new String(user, StandardCharsets.UTF_8));
+            credentials.put(IAuthenticator.PASSWORD_KEY, new String(pass, StandardCharsets.UTF_8));
             return credentials;
         }
     }

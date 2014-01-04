@@ -20,6 +20,7 @@ package org.apache.cassandra.db;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.*;
 
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -29,7 +30,6 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Config.DiskFailurePolicy;
 import org.apache.cassandra.db.Directories.DataDirectory;
-import org.apache.cassandra.db.compaction.LeveledManifest;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.util.FileUtils;
@@ -72,8 +72,6 @@ public class DirectoriesTest
 
             createFakeSSTable(dir, cf, 1, false, fs);
             createFakeSSTable(dir, cf, 2, true, fs);
-            // leveled manifest
-            new File(dir, cf + LeveledManifest.EXTENSION).createNewFile();
 
             File backupDir = new File(dir, Directories.BACKUPS_SUBDIR);
             backupDir.mkdir();
@@ -107,7 +105,7 @@ public class DirectoriesTest
         for (String cf : CFS)
         {
             Directories directories = Directories.create(KS, cf);
-            Assert.assertEquals(cfDir(cf), directories.getDirectoryForNewSSTables(0));
+            Assert.assertEquals(cfDir(cf), directories.getDirectoryForNewSSTables());
 
             Descriptor desc = new Descriptor(cfDir(cf), KS, cf, 1, false);
             File snapshotDir = new File(cfDir(cf),  File.separator + Directories.SNAPSHOT_SUBDIR + File.separator + "42");
@@ -164,16 +162,6 @@ public class DirectoriesTest
         }
     }
 
-    @Test
-    public void testLeveledManifestPath()
-    {
-        for (String cf : CFS)
-        {
-            Directories directories = Directories.create(KS, cf);
-            File manifest = new File(cfDir(cf), cf + LeveledManifest.EXTENSION);
-            Assert.assertEquals(manifest, directories.tryGetLeveledManifest());
-        }
-    }
 
     @Test
     public void testDiskFailurePolicy_best_effort() throws IOException
@@ -207,6 +195,27 @@ public class DirectoriesTest
             }
             
             DatabaseDescriptor.setDiskFailurePolicy(origPolicy);
+        }
+    }
+
+    @Test
+    public void testMTSnapshots() throws Exception
+    {
+        for (final String cf : CFS)
+        {
+            final Directories directories = Directories.create(KS, cf);
+            Assert.assertEquals(cfDir(cf), directories.getDirectoryForNewSSTables());
+            final String n = Long.toString(System.nanoTime());
+            Callable<File> directoryGetter = new Callable<File>() {
+                public File call() throws Exception {
+                    Descriptor desc = new Descriptor(cfDir(cf), KS, cf, 1, false);
+                    return directories.getSnapshotDirectory(desc, n);
+                }
+            };
+            List<Future<File>> invoked = Executors.newFixedThreadPool(2).invokeAll(Arrays.asList(directoryGetter, directoryGetter));
+            for(Future<File> fut:invoked) {
+                Assert.assertTrue(fut.get().exists());
+            }
         }
     }
 }

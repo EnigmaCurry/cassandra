@@ -20,16 +20,16 @@ package org.apache.cassandra.db;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Iterator;
 
 import com.google.common.collect.AbstractIterator;
 
+import org.apache.cassandra.db.composites.CType;
+import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.ByteBufferUtil;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,20 +54,18 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
 {
     private static final Logger logger = LoggerFactory.getLogger(RangeTombstoneList.class);
 
-    public static final Serializer serializer = new Serializer();
-
-    private final Comparator<ByteBuffer> comparator;
+    private final Comparator<Composite> comparator;
 
     // Note: we don't want to use a List for the markedAts and delTimes to avoid boxing. We could
     // use a List for starts and ends, but having arrays everywhere is almost simpler.
-    private ByteBuffer[] starts;
-    private ByteBuffer[] ends;
+    private Composite[] starts;
+    private Composite[] ends;
     private long[] markedAts;
     private int[] delTimes;
 
     private int size;
 
-    private RangeTombstoneList(Comparator<ByteBuffer> comparator, ByteBuffer[] starts, ByteBuffer[] ends, long[] markedAts, int[] delTimes, int size)
+    private RangeTombstoneList(Comparator<Composite> comparator, Composite[] starts, Composite[] ends, long[] markedAts, int[] delTimes, int size)
     {
         assert starts.length == ends.length && starts.length == markedAts.length && starts.length == delTimes.length;
         this.comparator = comparator;
@@ -78,9 +76,9 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
         this.size = size;
     }
 
-    public RangeTombstoneList(Comparator<ByteBuffer> comparator, int capacity)
+    public RangeTombstoneList(Comparator<Composite> comparator, int capacity)
     {
-        this(comparator, new ByteBuffer[capacity], new ByteBuffer[capacity], new long[capacity], new int[capacity], 0);
+        this(comparator, new Composite[capacity], new Composite[capacity], new long[capacity], new int[capacity], 0);
     }
 
     public boolean isEmpty()
@@ -93,7 +91,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
         return size;
     }
 
-    public Comparator<ByteBuffer> comparator()
+    public Comparator<Composite> comparator()
     {
         return comparator;
     }
@@ -119,7 +117,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
      * This method will be faster if the new tombstone sort after all the currently existing ones (this is a common use case), 
      * but it doesn't assume it.
      */
-    public void add(ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
+    public void add(Composite start, Composite end, long markedAt, int delTime)
     {
         if (isEmpty())
         {
@@ -127,22 +125,18 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
             return;
         }
 
-        int c = comparator.compare(starts[size-1], start);
+        int c = comparator.compare(ends[size-1], start);
 
         // Fast path if we add in sorted order
         if (c <= 0)
         {
-            // Note that we may still overlap the last range
-            insertFrom(size-1, start, end, markedAt, delTime);
+            addInternal(size, start, end, markedAt, delTime);
         }
         else
         {
-            int pos = Arrays.binarySearch(starts, 0, size, start, comparator);
-            if (pos >= 0)
-                insertFrom(pos, start, end, markedAt, delTime);
-            else
-                // Insertion point (-pos-1) is such start < start[-pos-1], so we should insert from the previous
-                insertFrom(-pos-2, start, end, markedAt, delTime);
+            // Note: insertFrom expect i to be the insertion point in term of interval ends
+            int pos = Arrays.binarySearch(ends, 0, size, start, comparator);
+            insertFrom((pos >= 0 ? pos+1 : -pos-1), start, end, markedAt, delTime);
         }
     }
 
@@ -162,11 +156,11 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
 
         /*
          * We basically have 2 techniques we can use here: either we repeatedly call add() on tombstones values,
-         * or we do a merge of both (sorted) lists. If this lists is bigger enough than the one we add, the
+         * or we do a merge of both (sorted) lists. If this lists is bigger enough than the one we add, then
          * calling add() will be faster, otherwise it's merging that will be faster.
          *
          * Let's note that during memtables updates, it might not be uncommon that a new update has only a few range
-         * tombstones, while the CF we're adding it to (the on in the memtable) has many. In that case, using add() is
+         * tombstones, while the CF we're adding it to (the one in the memtable) has many. In that case, using add() is
          * likely going to be faster.
          *
          * In other cases however, like when diffing responses from multiple nodes, the tombstone lists we "merge" will
@@ -189,9 +183,9 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
             int j = 0;
             while (i < size && j < tombstones.size)
             {
-                if (comparator.compare(tombstones.starts[j], starts[i]) < 0)
+                if (comparator.compare(tombstones.starts[j], ends[i]) < 0)
                 {
-                    insertFrom(i-1, tombstones.starts[j], tombstones.ends[j], tombstones.markedAts[j], tombstones.delTimes[j]);
+                    insertFrom(i, tombstones.starts[j], tombstones.ends[j], tombstones.markedAts[j], tombstones.delTimes[j]);
                     j++;
                 }
                 else
@@ -199,9 +193,9 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
                     i++;
                 }
             }
-            // Addds the remaining ones from tombstones if any (not that insertFrom will increment size if relevant).
+            // Addds the remaining ones from tombstones if any (note that addInternal will increment size if relevant).
             for (; j < tombstones.size; j++)
-                insertFrom(size - 1, tombstones.starts[j], tombstones.ends[j], tombstones.markedAts[j], tombstones.delTimes[j]);
+                addInternal(size, tombstones.starts[j], tombstones.ends[j], tombstones.markedAts[j], tombstones.delTimes[j]);
         }
     }
 
@@ -209,7 +203,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
      * Returns whether the given name/timestamp pair is deleted by one of the tombstone
      * of this RangeTombstoneList.
      */
-    public boolean isDeleted(ByteBuffer name, long timestamp)
+    public boolean isDeleted(Composite name, long timestamp)
     {
         int idx = searchInternal(name);
         return idx >= 0 && markedAts[idx] >= timestamp;
@@ -227,12 +221,12 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
      * Returns the DeletionTime for the tombstone overlapping {@code name} (there can't be more than one),
      * or null if {@code name} is not covered by any tombstone.
      */
-    public DeletionTime search(ByteBuffer name) {
+    public DeletionTime search(Composite name) {
         int idx = searchInternal(name);
         return idx < 0 ? null : new DeletionTime(markedAts[idx], delTimes[idx]);
     }
 
-    private int searchInternal(ByteBuffer name)
+    private int searchInternal(Composite name)
     {
         if (isEmpty())
             return -1;
@@ -263,7 +257,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
         int dataSize = TypeSizes.NATIVE.sizeof(size);
         for (int i = 0; i < size; i++)
         {
-            dataSize += starts[i].remaining() + ends[i].remaining();
+            dataSize += starts[i].dataSize() + ends[i].dataSize();
             dataSize += TypeSizes.NATIVE.sizeof(markedAts[i]);
             dataSize += TypeSizes.NATIVE.sizeof(delTimes[i]);
         }
@@ -309,7 +303,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
     /**
      * Returns whether {@code purge(gcBefore)} would remove something or not.
      */
-    public boolean hasIrrelevantData(int gcBefore)
+    public boolean hasPurgeableTombstones(int gcBefore)
     {
         for (int i = 0; i < size; i++)
         {
@@ -384,136 +378,106 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
     }
 
     /*
-     * Inserts a new element whose start should be inserted at index i. This method
-     * assumes that:
-     *   - starts[i] <= start
-     *   - start < starts[i+1] or there is no i+1 element.
+     * Inserts a new element starting at index i. This method assumes that i is the insertion point
+     * in term of intervals for start:
+     *    ends[i-1] <= start < ends[i]
      */
-    private void insertFrom(int i, ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
+    private void insertFrom(int i, Composite start, Composite end, long markedAt, int delTime)
     {
-        if (i < 0)
+        while (i < size)
         {
-            insertAfter(i, start, end, markedAt, delTime);
-            return;
-        }
+            assert i == 0 || comparator.compare(start, ends[i-1]) >= 0;
+            assert i >= size || comparator.compare(start, ends[i]) < 0;
 
-        /*
-         * We have elt(i) = [s_i, e_i]@t_i and want to insert X = [s, e]@t, knowing that s_i < s < s_i+1.
-         * We can have 3 cases:
-         *  - s < e_i && e <= e_i: we're fully contained in i.
-         *  - s < e_i && e > e_i: we rewrite X to X1=[s, e_i]@t + X2=[e_i, e]@t. X1 is fully contained
-         *             in i and X2 is the insertAfter() case for i.
-         *  - s >= e_i: we're in the insertAfter() case for i.
-         */
-        if (comparator.compare(start, ends[i]) < 0)
-        {
-            if (comparator.compare(end, ends[i]) <= 0)
+            // Do we overwrite the current element?
+            if (markedAt > markedAts[i])
             {
-                update(i, start, end, markedAt, delTime);
+                // We do overwrite.
+
+                // First deal with what might come before the newly added one.
+                if (comparator.compare(starts[i], start) < 0)
+                {
+                    addInternal(i, starts[i], start, markedAts[i], delTimes[i]);
+                    i++;
+                    // We don't need to do the following line, but in spirit that's what we want to do
+                    // setInternal(i, start, ends[i], markedAts, delTime])
+                }
+
+                // now, start <= starts[i]
+
+                // If the new element stops before the current one, insert it and
+                // we're done
+                if (comparator.compare(end, starts[i]) <= 0)
+                {
+                    addInternal(i, start, end, markedAt, delTime);
+                    return;
+                }
+
+                // Do we overwrite the current element fully?
+                int cmp = comparator.compare(ends[i], end);
+                if (cmp <= 0)
+                {
+                    // We do overwrite fully:
+                    // update the current element until it's end and continue
+                    // on with the next element (with the new inserted start == current end).
+
+                    // If we're on the last element, we can optimize
+                    if (i == size-1)
+                    {
+                        setInternal(i, start, end, markedAt, delTime);
+                        return;
+                    }
+
+                    setInternal(i, start, ends[i], markedAt, delTime);
+                    if (cmp == 0)
+                        return;
+
+                    start = ends[i];
+                    i++;
+                }
+                else
+                {
+                    // We don't ovewrite fully. Insert the new interval, and then update the now next
+                    // one to reflect the not overwritten parts. We're then done.
+                    addInternal(i, start, end, markedAt, delTime);
+                    i++;
+                    setInternal(i, end, ends[i], markedAts[i], delTimes[i]);
+                    return;
+                }
             }
             else
             {
-                insertAfter(i, ends[i], end, markedAt, delTime);
-                update(i, start, ends[i], markedAt, delTime);
+                // we don't overwrite the current element
+
+                // If the new interval starts before the current one, insert that new interval
+                if (comparator.compare(start, starts[i]) < 0)
+                {
+                    // If we stop before the start of the current element, just insert the new
+                    // interval and we're done; otherwise insert until the beginning of the
+                    // current element
+                    if (comparator.compare(end, starts[i]) <= 0)
+                    {
+                        addInternal(i, start, end, markedAt, delTime);
+                        return;
+                    }
+                    addInternal(i, start, starts[i], markedAt, delTime);
+                    i++;
+                }
+
+                // After that, we're overwritten on the current element but might have
+                // some residual parts after ...
+
+                // ... unless we don't extend beyond it.
+                if (comparator.compare(end, ends[i]) <= 0)
+                    return;
+
+                start = ends[i];
+                i++;
             }
         }
-        else
-        {
-            insertAfter(i, start, end, markedAt, delTime);
-        }
-    }
 
-    /*
-     * Inserts a new element knowing that the new element start strictly after
-     * the one at index i, i.e that:
-     *   - ends[i] <= start (or i == -1)
-     */
-    private void insertAfter(int i, ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
-    {
-        if (i == size - 1)
-        {
-            addInternal(i+1, start, end, markedAt, delTime);
-            return;
-        }
-
-        /*
-         * We have the following intervals:
-         *           i            i+1
-         *   ..., [s1, e1]@t1, [s2, e2]@t2, ...
-         *
-         * And we want to insert X = [s, e]@t, knowing that e1 <= s.
-         * We can have 2 cases:
-         *  - s < s2: we rewrite X to X1=[s, s2]@t + X2=[s2, e]@t. X2 meet the weakInsertFrom() condition
-         *            for i+1, and X1 is a new element between i and i+1.
-         *  - s2 <= s: we're in the weakInsertFrom() case for i+1.
-         */
-        if (comparator.compare(start, starts[i+1]) < 0)
-        {
-            /*
-             * If it happens the new element is fully before the current one, we insert it and
-             * we're done
-             */
-            if (comparator.compare(end, starts[i+1]) <= 0)
-            {
-                addInternal(i+1, start, end, markedAt, delTime);
-                return;
-            }
-
-            weakInsertFrom(i+1, starts[i+1], end, markedAt, delTime);
-            addInternal(i+1, start, starts[i+1], markedAt, delTime);
-        }
-        else
-        {
-            weakInsertFrom(i+1, start, end, markedAt, delTime);
-        }
-    }
-
-    /*
-     * Weak version of insertFrom that only assumes the new element starts after index i,
-     * but without knowing about the 2nd condition, i.e. this only assume that:
-     *   - starts[i] <= start
-     */
-    private void weakInsertFrom(int i, ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
-    {
-        /*
-         * Either start is before the next element start, and we're in fact in the insertFrom()
-         * case, or it's not and it's an weakInsertFrom for the next index.
-         */
-        if (i == size - 1 || comparator.compare(start, starts[i+1]) < 0)
-            insertFrom(i, start, end, markedAt, delTime);
-        else
-            weakInsertFrom(i+1, start, end, markedAt, delTime);
-    }
-
-    /*
-     * Update index i with new element, assuming that new element is contained in the element i,
-     * i.e that:
-     *   - starts[i] <= s
-     *   - e <= end[i]
-     */
-    private void update(int i, ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
-    {
-        /*
-         * If the new markedAt is lower than the one of i, we can ignore the
-         * new element, otherwise we split the current element.
-         */
-        if (markedAts[i] < markedAt)
-        {
-            if (comparator.compare(ends[i], end) != 0)
-                addInternal(i+1, end, ends[i], markedAts[i], delTimes[i]);
-
-            if (comparator.compare(starts[i], start) == 0)
-            {
-                markedAts[i] = markedAt;
-                delTimes[i] = delTime;
-                ends[i] = end;
-            }
-            else
-            {
-                addInternal(i+1, start, end, markedAt, delTime);
-                ends[i] = start;
-            }
-        }
+        // If we got there, then just insert the remainder at the end
+        addInternal(i, start, end, markedAt, delTime);
     }
 
     private int capacity()
@@ -524,7 +488,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
     /*
      * Adds the new tombstone at index i, growing and/or moving elements to make room for it.
      */
-    private void addInternal(int i, ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
+    private void addInternal(int i, Composite start, Composite end, long markedAt, int delTime)
     {
         assert i >= 0;
 
@@ -563,12 +527,12 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
         delTimes = grow(delTimes, size, newLength, i);
     }
 
-    private static ByteBuffer[] grow(ByteBuffer[] a, int size, int newLength, int i)
+    private static Composite[] grow(Composite[] a, int size, int newLength, int i)
     {
         if (i < 0 || i >= size)
             return Arrays.copyOf(a, newLength);
 
-        ByteBuffer[] newA = new ByteBuffer[newLength];
+        Composite[] newA = new Composite[newLength];
         System.arraycopy(a, 0, newA, 0, i);
         System.arraycopy(a, i, newA, i+1, size - i);
         return newA;
@@ -610,7 +574,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
         System.arraycopy(delTimes, i, delTimes, i+1, size - i);
     }
 
-    private void setInternal(int i, ByteBuffer start, ByteBuffer end, long markedAt, int delTime)
+    private void setInternal(int i, Composite start, Composite end, long markedAt, int delTime)
     {
         starts[i] = start;
         ends[i] = end;
@@ -620,7 +584,12 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
 
     public static class Serializer implements IVersionedSerializer<RangeTombstoneList>
     {
-        private Serializer() {}
+        private final CType type;
+
+        public Serializer(CType type)
+        {
+            this.type = type;
+        }
 
         public void serialize(RangeTombstoneList tombstones, DataOutput out, int version) throws IOException
         {
@@ -633,34 +602,25 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
             out.writeInt(tombstones.size);
             for (int i = 0; i < tombstones.size; i++)
             {
-                ByteBufferUtil.writeWithShortLength(tombstones.starts[i], out);
-                ByteBufferUtil.writeWithShortLength(tombstones.ends[i], out);
+                type.serializer().serialize(tombstones.starts[i], out);
+                type.serializer().serialize(tombstones.ends[i], out);
                 out.writeInt(tombstones.delTimes[i]);
                 out.writeLong(tombstones.markedAts[i]);
             }
         }
 
-        /*
-         * RangeTombstoneList depends on the column family comparator, but it is not serialized.
-         * Thus deserialize(DataInput, int, Comparator<ByteBuffer>) should be used instead of this method.
-         */
         public RangeTombstoneList deserialize(DataInput in, int version) throws IOException
-        {
-            throw new UnsupportedOperationException();
-        }
-
-        public RangeTombstoneList deserialize(DataInput in, int version, Comparator<ByteBuffer> comparator) throws IOException
         {
             int size = in.readInt();
             if (size == 0)
                 return null;
 
-            RangeTombstoneList tombstones = new RangeTombstoneList(comparator, size);
+            RangeTombstoneList tombstones = new RangeTombstoneList(type, size);
 
             for (int i = 0; i < size; i++)
             {
-                ByteBuffer start = ByteBufferUtil.readWithShortLength(in);
-                ByteBuffer end = ByteBufferUtil.readWithShortLength(in);
+                Composite start = type.serializer().deserialize(in);
+                Composite end = type.serializer().deserialize(in);
                 int delTime =  in.readInt();
                 long markedAt = in.readLong();
 
@@ -692,10 +652,8 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
             long size = typeSizes.sizeof(tombstones.size);
             for (int i = 0; i < tombstones.size; i++)
             {
-                int startSize = tombstones.starts[i].remaining();
-                size += typeSizes.sizeof((short)startSize) + startSize;
-                int endSize = tombstones.ends[i].remaining();
-                size += typeSizes.sizeof((short)endSize) + endSize;
+                size += type.serializer().serializedSize(tombstones.starts[i], typeSizes);
+                size += type.serializer().serializedSize(tombstones.ends[i], typeSizes);
                 size += typeSizes.sizeof(tombstones.delTimes[i]);
                 size += typeSizes.sizeof(tombstones.markedAts[i]);
             }
@@ -721,7 +679,7 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>
     {
         private int idx;
 
-        public boolean isDeleted(ByteBuffer name, long timestamp)
+        public boolean isDeleted(Composite name, long timestamp)
         {
             while (idx < size)
             {

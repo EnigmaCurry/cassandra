@@ -132,6 +132,9 @@ esac
 #MAX_HEAP_SIZE="4G"
 #HEAP_NEWSIZE="800M"
 
+# Set this to control the amount of arenas per-thread in glibc
+#MALLOC_ARENA_MAX=4
+
 if [ "x$MAX_HEAP_SIZE" = "x" ] && [ "x$HEAP_NEWSIZE" = "x" ]; then
     calculate_heap_sizes
 else
@@ -139,6 +142,11 @@ else
         echo "please set or unset MAX_HEAP_SIZE and HEAP_NEWSIZE in pairs (see cassandra-env.sh)"
         exit 1
     fi
+fi
+
+if [ "x$MALLOC_ARENA_MAX" = "x" ]
+then
+    MALLOC_ARENA_MAX=4
 fi
 
 # Specifies the default port over which Cassandra will be available for
@@ -187,7 +195,8 @@ startswith() { [ "${1#$2}" != "$1" ]; }
 # Per-thread stack size.
 JVM_OPTS="$JVM_OPTS -Xss256k"
 
-echo "xss = $JVM_OPTS"
+# Larger interned string table, for gossip's benefit (CASSANDRA-6410)
+JVM_OPTS="$JVM_OPTS -XX:StringTableSize=1000003"
 
 # GC tuning options
 JVM_OPTS="$JVM_OPTS -XX:+UseParNewGC" 
@@ -199,7 +208,7 @@ JVM_OPTS="$JVM_OPTS -XX:CMSInitiatingOccupancyFraction=75"
 JVM_OPTS="$JVM_OPTS -XX:+UseCMSInitiatingOccupancyOnly"
 JVM_OPTS="$JVM_OPTS -XX:+UseTLAB"
 # note: bash evals '1.7.x' as > '1.7' so this is really a >= 1.7 jvm check
-if [ "$JVM_VERSION" \> "1.7" ] ; then
+if [ "$JVM_VERSION" \> "1.7" ] && [ "$JVM_ARCH" = "64-Bit" ] ; then
     JVM_OPTS="$JVM_OPTS -XX:+UseCondCardMark"
 fi
 

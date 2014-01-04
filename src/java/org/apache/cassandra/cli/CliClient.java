@@ -25,9 +25,9 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-import com.google.common.base.Charsets;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.Iterables;
@@ -195,8 +195,8 @@ public class CliClient
     {
         sessionState.out.println("Welcome to Cassandra CLI version " + FBUtilities.getReleaseVersionString() + "\n");
 
-        sessionState.out.println("Please consider using the more convenient cqlsh instead of CLI");
-        sessionState.out.println("CQL3 is fully backwards compatible with Thrift data; see http://www.datastax.com/dev/blog/thrift-to-cql3\n");
+        sessionState.out.println("The CLI is deprecated and will be removed in Cassandra 3.0.  Consider migrating to cqlsh.");
+        sessionState.out.println("CQL is fully backwards compatible with Thrift data; see http://www.datastax.com/dev/blog/thrift-to-cql3\n");
 
         sessionState.out.println(getHelp().banner);
     }
@@ -628,9 +628,8 @@ public class CliClient
             }
             catch (RequestValidationException ce)
             {
-                StringBuilder errorMessage = new StringBuilder("Unknown comparator '" + compareWith + "'. ");
-                errorMessage.append("Available functions: ");
-                throw new RuntimeException(errorMessage.append(Function.getFunctionNames()).toString(), e);
+                String message = String.format("Unknown comparator '%s'. Available functions: %s", compareWith, Function.getFunctionNames());
+                throw new RuntimeException(message, e);
             }
         }
 
@@ -760,7 +759,7 @@ public class CliClient
         }
         else
         {
-            valueAsString = (validator == null) ? new String(columnValue, Charsets.UTF_8) : validator.getString(ByteBuffer.wrap(columnValue));
+            valueAsString = (validator == null) ? new String(columnValue, StandardCharsets.UTF_8) : validator.getString(ByteBuffer.wrap(columnValue));
         }
 
         String formattedColumnName = isSuper
@@ -1168,8 +1167,10 @@ public class CliClient
 
         try
         {
-            // request correct cfDef from the server
-            CfDef cfDef = getCfDef(thriftClient.describe_keyspace(this.keySpace), cfName);
+            // request correct cfDef from the server (we let that call include CQL3 cf even though
+            // they can't be modified by thrift because the error message that will be thrown by
+            // system_update_column_family will be more useful)
+            CfDef cfDef = getCfDef(thriftClient.describe_keyspace(this.keySpace), cfName, true);
 
             if (cfDef == null)
                 throw new RuntimeException("Column Family " + cfName + " was not found in the current keyspace.");
@@ -1766,7 +1767,7 @@ public class CliClient
             String prefix = "";
             for (Map.Entry<String, String> opt : ksDef.strategy_options.entrySet())
             {
-                opts.append(prefix + CliUtils.escapeSQLString(opt.getKey()) + " : " + CliUtils.escapeSQLString(opt.getValue()));
+                opts.append(prefix).append(CliUtils.escapeSQLString(opt.getKey())).append(" : ").append(CliUtils.escapeSQLString(opt.getValue()));
                 prefix = ", ";
             }
             opts.append("}");
@@ -1778,7 +1779,7 @@ public class CliClient
         output.append(";").append(NEWLINE);
         output.append(NEWLINE);
 
-        output.append("use " + CliUtils.maybeEscapeName(ksDef.name) + ";");
+        output.append("use ").append(CliUtils.maybeEscapeName(ksDef.name)).append(";");
         output.append(NEWLINE);
         output.append(NEWLINE);
 
@@ -2302,7 +2303,7 @@ public class CliClient
                                                          "of the keyspaces first.", entityName));
 
             CfDef inputCfDef = (inputKsDef == null)
-                    ? getCfDef(currentKeySpace, entityName)
+                    ? getCfDef(currentKeySpace, entityName, false)
                     : null;  // no need to lookup CfDef if we know that it was keyspace
 
             if (inputKsDef != null)
@@ -2327,7 +2328,7 @@ public class CliClient
             }
             else
             {
-                sessionState.out.println("Sorry, no Keyspace nor ColumnFamily was found with name: " + entityName);
+                sessionState.out.println("Sorry, no Keyspace nor (non-CQL3) ColumnFamily was found with name: " + entityName + " (if this is a CQL3 table, you should use cqlsh instead)");
             }
         }
     }
@@ -2400,7 +2401,7 @@ public class CliClient
     private CfDef getCfDef(String keySpaceName, String columnFamilyName)
     {
         KsDef ksDef = keyspacesMap.get(keySpaceName);
-        CfDef cfDef = getCfDef(ksDef, columnFamilyName);
+        CfDef cfDef = getCfDef(ksDef, columnFamilyName, true);
         if (cfDef == null)
             throw new RuntimeException("No such column family: " + columnFamilyName);
         return cfDef;
@@ -2416,7 +2417,7 @@ public class CliClient
         return getCfDef(this.keySpace, columnFamilyName);
     }
 
-    private CfDef getCfDef(KsDef keyspace, String columnFamilyName)
+    private CfDef getCfDef(KsDef keyspace, String columnFamilyName, boolean includeCQL3)
     {
         for (CfDef cfDef : keyspace.cf_defs)
         {
@@ -2424,7 +2425,7 @@ public class CliClient
                 return cfDef;
         }
 
-        return cql3KeyspacesMap.get(keyspace.name).get(columnFamilyName);
+        return includeCQL3 ? cql3KeyspacesMap.get(keyspace.name).get(columnFamilyName) : null;
     }
 
     /**
@@ -2828,9 +2829,8 @@ public class CliClient
         }
         catch (IllegalArgumentException e)
         {
-            StringBuilder errorMessage = new StringBuilder("Function '" + functionName + "' not found. ");
-            errorMessage.append("Available functions: ");
-            throw new RuntimeException(errorMessage.append(Function.getFunctionNames()).toString(), e);
+            String message = String.format("Function '%s' not found. Available functions: %s", functionName, Function.getFunctionNames());
+            throw new RuntimeException(message, e);
         }
 
         return function.getValidator();

@@ -21,7 +21,6 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.net.InetAddress;
-import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Future;
@@ -38,23 +37,22 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.KSMetaData;
+import org.apache.cassandra.config.UTMetaData;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.*;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
 
 public class MigrationManager implements IEndpointStateChangeSubscriber
 {
     private static final Logger logger = LoggerFactory.getLogger(MigrationManager.class);
-
-    private static final ByteBuffer LAST_MIGRATION_KEY = ByteBufferUtil.bytes("Last Migration");
 
     public static final MigrationManager instance = new MigrationManager();
 
@@ -77,6 +75,9 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
     }
 
     public void onJoin(InetAddress endpoint, EndpointState epState)
+    {}
+    
+    public void beforeChange(InetAddress endpoint, EndpointState currentState, ApplicationState newStateKey, VersionedValue newValue) 
     {}
 
     public void onChange(InetAddress endpoint, ApplicationState state, VersionedValue value)
@@ -110,7 +111,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
      */
     private static void maybeScheduleSchemaPull(final UUID theirVersion, final InetAddress endpoint)
     {
-        if (Schema.instance.getVersion().equals(theirVersion) || !shouldPullSchemaFrom(endpoint))
+        if ((Schema.instance.getVersion() != null && Schema.instance.getVersion().equals(theirVersion)) || !shouldPullSchemaFrom(endpoint))
             return;
 
         if (Schema.emptyVersion.equals(Schema.instance.getVersion()) || runtimeMXBean.getUptime() < MIGRATION_DELAY_IN_MS)
@@ -127,7 +128,10 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
                 public void run()
                 {
                     // grab the latest version of the schema since it may have changed again since the initial scheduling
-                    VersionedValue value = Gossiper.instance.getEndpointStateForEndpoint(endpoint).getApplicationState(ApplicationState.SCHEMA);
+                    EndpointState epState = Gossiper.instance.getEndpointStateForEndpoint(endpoint);
+                    if (epState == null)
+                        return;
+                    VersionedValue value = epState.getApplicationState(ApplicationState.SCHEMA);
                     UUID currentVersion = UUID.fromString(value.value);
                     if (Schema.instance.getVersion().equals(currentVersion))
                         return;
@@ -229,6 +233,11 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         announce(cfm.toSchema(FBUtilities.timestampMicros()));
     }
 
+    public static void announceNewType(UserType newType)
+    {
+        announce(UTMetaData.toSchema(newType, FBUtilities.timestampMicros()));
+    }
+
     public static void announceKeyspaceUpdate(KSMetaData ksm) throws ConfigurationException
     {
         ksm.validate();
@@ -255,6 +264,12 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         announce(oldCfm.toSchemaUpdate(cfm, FBUtilities.timestampMicros(), fromThrift));
     }
 
+    public static void announceTypeUpdate(UserType updatedType)
+    {
+        // We don't make a difference with a new type. DefsTable.mergeType will make sure we keep the updated version.
+        announceNewType(updatedType);
+    }
+
     public static void announceKeyspaceDrop(String ksName) throws ConfigurationException
     {
         KSMetaData oldKsm = Schema.instance.getKSMetaData(ksName);
@@ -275,25 +290,30 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         announce(oldCfm.dropFromSchema(FBUtilities.timestampMicros()));
     }
 
+    public static void announceTypeDrop(UserType droppedType)
+    {
+        announce(UTMetaData.dropFromSchema(droppedType, FBUtilities.timestampMicros()));
+    }
+
     /**
      * actively announce a new version to active hosts via rpc
      * @param schema The schema mutation to be applied
      */
-    private static void announce(RowMutation schema)
+    private static void announce(Mutation schema)
     {
         FBUtilities.waitOnFuture(announce(Collections.singletonList(schema)));
     }
 
-    private static void pushSchemaMutation(InetAddress endpoint, Collection<RowMutation> schema)
+    private static void pushSchemaMutation(InetAddress endpoint, Collection<Mutation> schema)
     {
-        MessageOut<Collection<RowMutation>> msg = new MessageOut<>(MessagingService.Verb.DEFINITIONS_UPDATE,
-                                                                   schema,
-                                                                   MigrationsSerializer.instance);
+        MessageOut<Collection<Mutation>> msg = new MessageOut<>(MessagingService.Verb.DEFINITIONS_UPDATE,
+                                                                schema,
+                                                                MigrationsSerializer.instance);
         MessagingService.instance().sendOneWay(msg, endpoint);
     }
 
     // Returns a future on the local application of the schema
-    private static Future<?> announce(final Collection<RowMutation> schema)
+    private static Future<?> announce(final Collection<Mutation> schema)
     {
         Future<?> f = StageManager.getStage(Stage.MIGRATION).submit(new WrappedRunnable()
         {
@@ -326,7 +346,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
     public static void passiveAnnounce(UUID version)
     {
         Gossiper.instance.addLocalApplicationState(ApplicationState.SCHEMA, StorageService.instance.valueFactory.schema(version));
-        logger.debug("Gossiping my schema version " + version);
+        logger.debug("Gossiping my schema version {}", version);
     }
 
     /**
@@ -342,10 +362,8 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         logger.debug("Truncating schema tables...");
 
         // truncate schema tables
-        SystemKeyspace.schemaCFS(SystemKeyspace.SCHEMA_KEYSPACES_CF).truncateBlocking();
-        SystemKeyspace.schemaCFS(SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF).truncateBlocking();
-        SystemKeyspace.schemaCFS(SystemKeyspace.SCHEMA_COLUMNS_CF).truncateBlocking();
-        SystemKeyspace.schemaCFS(SystemKeyspace.SCHEMA_TRIGGERS_CF).truncateBlocking();
+        for (String cf : SystemKeyspace.allSchemaCfs)
+            SystemKeyspace.schemaCFS(cf).truncateBlocking();
 
         logger.debug("Clearing local schema keyspace definitions...");
 
@@ -368,33 +386,33 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         logger.info("Local schema reset is complete.");
     }
 
-    public static class MigrationsSerializer implements IVersionedSerializer<Collection<RowMutation>>
+    public static class MigrationsSerializer implements IVersionedSerializer<Collection<Mutation>>
     {
         public static MigrationsSerializer instance = new MigrationsSerializer();
 
-        public void serialize(Collection<RowMutation> schema, DataOutput out, int version) throws IOException
+        public void serialize(Collection<Mutation> schema, DataOutput out, int version) throws IOException
         {
             out.writeInt(schema.size());
-            for (RowMutation rm : schema)
-                RowMutation.serializer.serialize(rm, out, version);
+            for (Mutation mutation : schema)
+                Mutation.serializer.serialize(mutation, out, version);
         }
 
-        public Collection<RowMutation> deserialize(DataInput in, int version) throws IOException
+        public Collection<Mutation> deserialize(DataInput in, int version) throws IOException
         {
             int count = in.readInt();
-            Collection<RowMutation> schema = new ArrayList<RowMutation>(count);
+            Collection<Mutation> schema = new ArrayList<Mutation>(count);
 
             for (int i = 0; i < count; i++)
-                schema.add(RowMutation.serializer.deserialize(in, version));
+                schema.add(Mutation.serializer.deserialize(in, version));
 
             return schema;
         }
 
-        public long serializedSize(Collection<RowMutation> schema, int version)
+        public long serializedSize(Collection<Mutation> schema, int version)
         {
             int size = TypeSizes.NATIVE.sizeof(schema.size());
-            for (RowMutation rm : schema)
-                size += RowMutation.serializer.serializedSize(rm, version);
+            for (Mutation mutation : schema)
+                size += Mutation.serializer.serializedSize(mutation, version);
             return size;
         }
     }

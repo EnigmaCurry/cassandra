@@ -33,16 +33,18 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.cql3.ColumnNameBuilder;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
+import org.apache.cassandra.exceptions.OverloadedException;
+import org.apache.cassandra.exceptions.UnavailableException;
+import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
-import org.apache.cassandra.utils.WrappedRunnable;
 
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
@@ -69,46 +71,43 @@ public class Tracing
 
     public static final Tracing instance = new Tracing();
 
-    public static void addColumn(ColumnFamily cf, ByteBuffer name, InetAddress address)
+    public static void addColumn(ColumnFamily cf, CellName name, InetAddress address)
     {
         addColumn(cf, name, ByteBufferUtil.bytes(address));
     }
 
-    public static void addColumn(ColumnFamily cf, ByteBuffer name, int value)
+    public static void addColumn(ColumnFamily cf, CellName name, int value)
     {
         addColumn(cf, name, ByteBufferUtil.bytes(value));
     }
 
-    public static void addColumn(ColumnFamily cf, ByteBuffer name, long value)
+    public static void addColumn(ColumnFamily cf, CellName name, long value)
     {
         addColumn(cf, name, ByteBufferUtil.bytes(value));
     }
 
-    public static void addColumn(ColumnFamily cf, ByteBuffer name, String value)
+    public static void addColumn(ColumnFamily cf, CellName name, String value)
     {
         addColumn(cf, name, ByteBufferUtil.bytes(value));
     }
 
-    private static void addColumn(ColumnFamily cf, ByteBuffer name, ByteBuffer value)
+    private static void addColumn(ColumnFamily cf, CellName name, ByteBuffer value)
     {
-        cf.addColumn(new ExpiringColumn(name, value, System.currentTimeMillis(), TTL));
+        cf.addColumn(new ExpiringCell(name, value, System.currentTimeMillis(), TTL));
     }
 
     public void addParameterColumns(ColumnFamily cf, Map<String, String> rawPayload)
     {
         for (Map.Entry<String, String> entry : rawPayload.entrySet())
         {
-            cf.addColumn(new ExpiringColumn(buildName(cf.metadata(), bytes("parameters"), bytes(entry.getKey())),
-                                            bytes(entry.getValue()), System.currentTimeMillis(), TTL));
+            cf.addColumn(new ExpiringCell(buildName(CFMetaData.TraceSessionsCf, "parameters", entry.getKey()),
+                                          bytes(entry.getValue()), System.currentTimeMillis(), TTL));
         }
     }
 
-    public static ByteBuffer buildName(CFMetaData meta, ByteBuffer... args)
+    public static CellName buildName(CFMetaData meta, Object... args)
     {
-        ColumnNameBuilder builder = meta.getCfDef().getColumnNameBuilder();
-        for (ByteBuffer arg : args)
-            builder.add(arg);
-        return builder.build();
+        return meta.comparator.makeCellName(args);
     }
 
     public UUID getSessionId()
@@ -161,15 +160,14 @@ public class Tracing
             final int elapsed = state.elapsed();
             final ByteBuffer sessionIdBytes = state.sessionIdBytes;
 
-            StageManager.getStage(Stage.TRACING).execute(new WrappedRunnable()
+            StageManager.getStage(Stage.TRACING).execute(new Runnable()
             {
-                public void runMayThrow() throws Exception
+                public void run()
                 {
                     CFMetaData cfMeta = CFMetaData.TraceSessionsCf;
                     ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfMeta);
-                    addColumn(cf, buildName(cfMeta, bytes("duration")), elapsed);
-                    RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes, cf);
-                    StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
+                    addColumn(cf, buildName(cfMeta, "duration"), elapsed);
+                    mutateWithCatch(new Mutation(TRACE_KS, sessionIdBytes, cf));
                 }
             });
 
@@ -200,18 +198,17 @@ public class Tracing
         final long started_at = System.currentTimeMillis();
         final ByteBuffer sessionIdBytes = state.get().sessionIdBytes;
 
-        StageManager.getStage(Stage.TRACING).execute(new WrappedRunnable()
+        StageManager.getStage(Stage.TRACING).execute(new Runnable()
         {
-            public void runMayThrow() throws Exception
+            public void run()
             {
                 CFMetaData cfMeta = CFMetaData.TraceSessionsCf;
-                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfMeta);
-                addColumn(cf, buildName(cfMeta, bytes("coordinator")), FBUtilities.getBroadcastAddress());
+                ColumnFamily cf = TreeMapBackedSortedColumns.factory.create(cfMeta);
+                addColumn(cf, buildName(cfMeta, "coordinator"), FBUtilities.getBroadcastAddress());
                 addParameterColumns(cf, parameters);
-                addColumn(cf, buildName(cfMeta, bytes("request")), request);
-                addColumn(cf, buildName(cfMeta, bytes("started_at")), started_at);
-                RowMutation mutation = new RowMutation(TRACE_KS, sessionIdBytes, cf);
-                StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
+                addColumn(cf, buildName(cfMeta, "request"), request);
+                addColumn(cf, buildName(cfMeta, "started_at"), started_at);
+                mutateWithCatch(new Mutation(TRACE_KS, sessionIdBytes, cf));
             }
         });
     }
@@ -281,5 +278,22 @@ public class Tracing
             return;
 
         state.trace(format, args);
+    }
+
+    static void mutateWithCatch(Mutation mutation)
+    {
+        try
+        {
+            StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
+        }
+        catch (UnavailableException | WriteTimeoutException e)
+        {
+            // should never happen; ANY does not throw UAE or WTE
+            throw new AssertionError(e);
+        }
+        catch (OverloadedException e)
+        {
+            logger.warn("Too many nodes are overloaded to save trace events");
+        }
     }
 }

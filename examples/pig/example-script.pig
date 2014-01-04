@@ -1,3 +1,4 @@
+-- CassandraStorage
 rows = LOAD 'cassandra://MyKeyspace/MyColumnFamily' USING CassandraStorage();
 cols = FOREACH rows GENERATE flatten(columns);
 colnames = FOREACH cols GENERATE $0;

@@ -256,6 +256,23 @@ public interface StorageServiceMBean extends NotificationEmitter
      *   userObject: int array of length 2, [0]=command number, [1]=ordinal of AntiEntropyService.Status
      *
      * @return Repair command number, or 0 if nothing to repair
+     */
+    public int forceRepairAsync(String keyspace, boolean isSequential, Collection<String> dataCenters, boolean primaryRange, String... columnFamilies);
+
+    /**
+     * Same as forceRepairAsync, but handles a specified range
+     */
+    public int forceRepairRangeAsync(String beginToken, String endToken, final String keyspaceName, boolean isSequential, Collection<String> dataCenters, final String... columnFamilies);
+
+
+    /**
+     * Invoke repair asynchronously.
+     * You can track repair progress by subscribing JMX notification sent from this StorageServiceMBean.
+     * Notification format is:
+     *   type: "repair"
+     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of AntiEntropyService.Status
+     *
+     * @return Repair command number, or 0 if nothing to repair
      * @see #forceKeyspaceRepair(String, boolean, boolean, String...)
      */
     public int forceRepairAsync(String keyspace, boolean isSequential, boolean isLocal, boolean primaryRange, String... columnFamilies);
@@ -322,7 +339,7 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void forceRemoveCompletion();
 
     /** set the logging level at runtime */
-    public void setLog4jLevel(String classQualifier, String level);
+    public void setLoggingLevel(String classQualifier, String level);
 
     /** get the operational mode (leaving, joining, normal, decommissioned, client) **/
     public String getOperationMode();
@@ -378,6 +395,9 @@ public interface StorageServiceMBean extends NotificationEmitter
     // allows a user to recover a forcibly 'killed' node
     public void startGossiping();
 
+    // allows a user to forcibly completely stop cassandra
+    public void stopDaemon();
+
     // to determine if gossip is disabled
     public boolean isInitialized();
 
@@ -398,6 +418,7 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void joinRing() throws IOException;
     public boolean isJoined();
 
+    @Deprecated
     public int getExceptionCount();
 
     public void setStreamThroughputMbPerSec(int value);
@@ -475,4 +496,14 @@ public interface StorageServiceMBean extends NotificationEmitter
     public String getClusterName();
     /** Returns the cluster partitioner */
     public String getPartitionerName();
+
+    /** Returns the threshold for warning of queries with many tombstones */
+    public int getTombstoneWarnThreshold();
+    /** Sets the threshold for warning queries with many tombstones */
+    public void setTombstoneWarnThreshold(int tombstoneDebugThreshold);
+
+    /** Returns the threshold for abandoning queries with many tombstones */
+    public int getTombstoneFailureThreshold();
+    /** Sets the threshold for abandoning queries with many tombstones */
+    public void setTombstoneFailureThreshold(int tombstoneDebugThreshold);
 }

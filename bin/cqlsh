@@ -32,7 +32,7 @@ exit 1
 from __future__ import with_statement
 
 description = "CQL Shell for Apache Cassandra"
-version = "4.0.1"
+version = "4.1.0"
 
 from StringIO import StringIO
 from itertools import groupby
@@ -66,9 +66,11 @@ except ImportError:
 CQL_LIB_PREFIX = 'cql-internal-only-'
 THRIFT_LIB_PREFIX = 'thrift-python-internal-only-'
 
+CASSANDRA_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+
 # use bundled libs for python-cql and thrift, if available. if there
 # is a ../lib dir, use bundled libs there preferentially.
-ZIPLIB_DIRS = [os.path.join(os.path.dirname(__file__), '..', 'lib')]
+ZIPLIB_DIRS = [os.path.join(CASSANDRA_PATH, 'lib')]
 myplatform = platform.system()
 if myplatform == 'Linux':
     ZIPLIB_DIRS.append('/usr/share/cassandra/lib')
@@ -106,7 +108,7 @@ from cql.cqltypes import (cql_types, cql_typename, lookup_casstype, lookup_cqlty
 
 # cqlsh should run correctly when run out of a Cassandra source tree,
 # out of an unpacked Cassandra tarball, and after a proper package install.
-cqlshlibdir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'pylib')
+cqlshlibdir = os.path.join(CASSANDRA_PATH, 'pylib')
 if os.path.isdir(cqlshlibdir):
     sys.path.insert(0, cqlshlibdir)
 
@@ -240,11 +242,12 @@ cqlsh_extra_syntax_rules = r'''
                      | "THREE"
                      | "QUORUM"
                      | "ALL"
+                     | "LOCAL_ONE"
                      | "LOCAL_QUORUM"
                      | "EACH_QUORUM"
                      ;
 
-<showCommand> ::= "SHOW" what=( "VERSION" | "HOST" )
+<showCommand> ::= "SHOW" what=( "VERSION" | "HOST" | "SESSION" sessionid=<uuid> )
                 ;
 
 <sourceCommand> ::= "SOURCE" fname=<stringLiteral>
@@ -567,6 +570,9 @@ class Shell(cmd.Cmd):
         # set_cql_version.
         vers['cql'] = self.cql_version
         print "[cqlsh %(shver)s | Cassandra %(build)s | CQL spec %(cql)s | Thrift protocol %(thrift)s]" % vers
+
+    def show_session(self, sessionid):
+        print_trace_session(self, self.cursor, sessionid)
 
     def get_connection_versions(self):
         self.cursor.execute("select * from system.local where key = 'local'")
@@ -913,8 +919,12 @@ class Shell(cmd.Cmd):
                 self.printerr(traceback.format_exc())
                 return False
 
-        if statement[:6].lower() == 'select':
+        if statement[:6].lower() == 'select' or statement.lower().startswith("list"):
             self.print_result(self.cursor, with_default_limit)
+        elif self.cursor.rowcount == 1:
+            # CAS INSERT/UPDATE
+            self.writeresult("")
+            self.print_static_result(self.cursor)
         self.flush_output()
         return True
 
@@ -1549,6 +1559,10 @@ class Shell(cmd.Cmd):
         SHOW HOST
 
           Shows where cqlsh is currently connected.
+
+        SHOW SESSION <sessionid>
+
+          Pretty-prints the requested tracing session.
         """
         showwhat = parsed.get_binding('what').lower()
         if showwhat == 'version':
@@ -1556,6 +1570,9 @@ class Shell(cmd.Cmd):
             self.show_version()
         elif showwhat == 'host':
             self.show_host()
+        elif showwhat.startswith('session'):
+            session_id = parsed.get_binding('sessionid').lower()
+            self.show_session(session_id)
         else:
             self.printerr('Wait, how do I show %r?' % (showwhat,))
 
@@ -1753,7 +1770,7 @@ class Shell(cmd.Cmd):
 
            Valid consistency levels:
 
-           ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_QUORUM and EACH_QUORUM.
+           ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_ONE, LOCAL_QUORUM and EACH_QUORUM.
 
         CONSISTENCY
 

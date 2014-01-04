@@ -69,18 +69,18 @@ public class AlterTableStatement
         CFMetaData cfm = meta.clone();
 
         ByteBuffer columnName = this.oType == OperationType.OPTS ? null
-                                                                 : meta.comparator.fromStringCQL2(this.columnName);
+                                                                 : meta.comparator.subtype(0).fromStringCQL2(this.columnName);
 
         switch (oType)
         {
             case ADD:
-                cfm.addColumnDefinition(ColumnDefinition.regularDef(columnName, TypeParser.parse(validator), null));
+                cfm.addColumnDefinition(ColumnDefinition.regularDef(cfm, columnName, TypeParser.parse(validator), null));
                 break;
 
             case ALTER:
                 // We only look for the first key alias which is ok for CQL2
                 ColumnDefinition partionKeyDef = cfm.partitionKeyColumns().get(0);
-                if (partionKeyDef.name.equals(columnName))
+                if (partionKeyDef.name.bytes.equals(columnName))
                 {
                     cfm.keyValidator(TypeParser.parse(validator));
                 }
@@ -90,7 +90,7 @@ public class AlterTableStatement
 
                     for (ColumnDefinition columnDef : cfm.regularColumns())
                     {
-                        if (columnDef.name.equals(columnName))
+                        if (columnDef.name.bytes.equals(columnName))
                         {
                             toUpdate = columnDef;
                             break;
@@ -102,7 +102,7 @@ public class AlterTableStatement
                                     this.columnName,
                                     columnFamily));
 
-                    toUpdate.setValidator(TypeParser.parse(validator));
+                    cfm.addOrReplaceColumnDefinition(toUpdate.withNewType(TypeParser.parse(validator)));
                 }
                 break;
 
@@ -111,7 +111,7 @@ public class AlterTableStatement
 
                 for (ColumnDefinition columnDef : cfm.regularColumns())
                 {
-                    if (columnDef.name.equals(columnName))
+                    if (columnDef.name.bytes.equals(columnName))
                     {
                         toDelete = columnDef;
                     }

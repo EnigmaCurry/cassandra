@@ -25,32 +25,37 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.service.CassandraDaemon;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.thrift.TProcessor;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.server.TServer;
 import org.apache.thrift.transport.TFramedTransport;
+import org.apache.thrift.transport.TTransportFactory;
 
 public class ThriftServer implements CassandraDaemon.Server
 {
     private static Logger logger = LoggerFactory.getLogger(ThriftServer.class);
-    final static String SYNC = "sync";
-    final static String ASYNC = "async";
-    final static String HSHA = "hsha";
+    protected final static String SYNC = "sync";
+    protected final static String ASYNC = "async";
+    protected final static String HSHA = "hsha";
 
-    private final InetAddress address;
-    private final int port;
+    protected final InetAddress address;
+    protected final int port;
+    protected final int backlog;
     private volatile ThriftServerThread server;
 
-    public ThriftServer(InetAddress address, int port)
+    public ThriftServer(InetAddress address, int port, int backlog)
     {
         this.address = address;
         this.port = port;
+        this.backlog = backlog;
     }
 
     public void start()
     {
         if (server == null)
         {
-            server = new ThriftServerThread(address, port);
+            CassandraServer iface = getCassandraServer();
+            server = new ThriftServerThread(address, port, backlog, iface, getProcessor(iface), getTransportFactory());
             server.start();
         }
     }
@@ -77,15 +82,40 @@ public class ThriftServer implements CassandraDaemon.Server
         return server != null;
     }
 
+    /*
+     * These methods are intended to be overridden to provide custom implementations.
+     */
+    protected CassandraServer getCassandraServer()
+    {
+        return new CassandraServer();
+    }
+
+    protected TProcessor getProcessor(CassandraServer server)
+    {
+        return new Cassandra.Processor<Cassandra.Iface>(server);
+    }
+
+    protected TTransportFactory getTransportFactory()
+    {
+        int tFramedTransportSize = DatabaseDescriptor.getThriftFramedTransportSize();
+        logger.info("Using TFramedTransport with a max frame size of {} bytes.", tFramedTransportSize);
+        return new TFramedTransport.Factory(tFramedTransportSize);
+    }
+
     /**
      * Simple class to run the thrift connection accepting code in separate
      * thread of control.
      */
     private static class ThriftServerThread extends Thread
     {
-        private TServer serverEngine;
+        private final TServer serverEngine;
 
-        public ThriftServerThread(InetAddress listenAddr, int listenPort)
+        public ThriftServerThread(InetAddress listenAddr,
+                                  int listenPort,
+                                  int listenBacklog,
+                                  CassandraServer server,
+                                  TProcessor processor,
+                                  TTransportFactory transportFactory)
         {
             // now we start listening for clients
             logger.info(String.format("Binding thrift service to %s:%s", listenAddr, listenPort));
@@ -93,16 +123,14 @@ public class ThriftServer implements CassandraDaemon.Server
             TServerFactory.Args args = new TServerFactory.Args();
             args.tProtocolFactory = new TBinaryProtocol.Factory(true, true);
             args.addr = new InetSocketAddress(listenAddr, listenPort);
-            args.cassandraServer = new CassandraServer();
-            args.processor = new Cassandra.Processor(args.cassandraServer);
+            args.listenBacklog = listenBacklog;
+            args.cassandraServer = server;
+            args.processor = processor;
             args.keepAlive = DatabaseDescriptor.getRpcKeepAlive();
             args.sendBufferSize = DatabaseDescriptor.getRpcSendBufferSize();
             args.recvBufferSize = DatabaseDescriptor.getRpcRecvBufferSize();
-            int tFramedTransportSize = DatabaseDescriptor.getThriftFramedTransportSize();
-
-            logger.info("Using TFramedTransport with a max frame size of {} bytes.", tFramedTransportSize);
-            args.inTransportFactory = new TFramedTransport.Factory(tFramedTransportSize);
-            args.outTransportFactory = new TFramedTransport.Factory(tFramedTransportSize);
+            args.inTransportFactory = transportFactory;
+            args.outTransportFactory = transportFactory;
             serverEngine = new TServerCustomFactory(DatabaseDescriptor.getRpcServerType()).buildTServer(args);
         }
 

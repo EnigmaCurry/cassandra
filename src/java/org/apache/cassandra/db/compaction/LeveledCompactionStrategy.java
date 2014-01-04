@@ -32,13 +32,11 @@ import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.notifications.INotification;
 import org.apache.cassandra.notifications.INotificationConsumer;
 import org.apache.cassandra.notifications.SSTableAddedNotification;
 import org.apache.cassandra.notifications.SSTableListChangedNotification;
-import org.apache.cassandra.utils.Pair;
 
 public class LeveledCompactionStrategy extends AbstractCompactionStrategy implements INotificationConsumer
 {
@@ -54,13 +52,20 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         super(cfs, options);
         int configuredMaxSSTableSize = 160;
         SizeTieredCompactionStrategyOptions localOptions = new SizeTieredCompactionStrategyOptions(options);
-        if (options.containsKey(SSTABLE_SIZE_OPTION))
-        {
-            configuredMaxSSTableSize = Integer.parseInt(options.get(SSTABLE_SIZE_OPTION));
-            if (configuredMaxSSTableSize >= 1000)
-            {
-                // Yes, people have done this
-                logger.warn("Max sstable size of {}MB is configured; having a unit of compaction this large is probably a bad idea", configuredMaxSSTableSize);
+        if (options != null)
+        {             
+            if (options.containsKey(SSTABLE_SIZE_OPTION))             
+            {                 
+                configuredMaxSSTableSize = Integer.parseInt(options.get(SSTABLE_SIZE_OPTION));                 
+                if (!Boolean.getBoolean("cassandra.tolerate_sstable_size"))                 
+                {                     
+                    if (configuredMaxSSTableSize >= 1000)
+                        logger.warn("Max sstable size of {}MB is configured for {}.{}; having a unit of compaction this large is probably a bad idea",
+                                configuredMaxSSTableSize, cfs.name, cfs.getColumnFamilyName());
+                    if (configuredMaxSSTableSize < 50)  
+                        logger.warn("Max sstable size of {}MB is configured for {}.{}.  Testing done for CASSANDRA-5727 indicates that performance improves up to 160MB",
+                                configuredMaxSSTableSize, cfs.name, cfs.getColumnFamilyName());
+                }
             }
         }
         maxSSTableSizeInMB = configuredMaxSSTableSize;
@@ -104,11 +109,9 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
     {
         while (true)
         {
-            Pair<? extends Collection<SSTableReader>, Integer> pair = manifest.getCompactionCandidates();
-            Collection<SSTableReader> sstables;
             OperationType op;
-            int level;
-            if (pair == null)
+            LeveledManifest.CompactionCandidate candidate = manifest.getCompactionCandidates();
+            if (candidate == null)
             {
                 // if there is no sstable to compact in standard way, try compacting based on droppable tombstone ratio
                 SSTableReader sstable = findDroppableSSTable(gcBefore);
@@ -117,20 +120,19 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
                     logger.debug("No compaction necessary for {}", this);
                     return null;
                 }
-                sstables = Collections.singleton(sstable);
+                candidate = new LeveledManifest.CompactionCandidate(Collections.singleton(sstable),
+                                                                    sstable.getSSTableLevel(),
+                                                                    getMaxSSTableBytes());
                 op = OperationType.TOMBSTONE_COMPACTION;
-                level = sstable.getSSTableLevel();
             }
             else
             {
                 op = OperationType.COMPACTION;
-                sstables = pair.left;
-                level = pair.right;
             }
 
-            if (cfs.getDataTracker().markCompacting(sstables))
+            if (cfs.getDataTracker().markCompacting(candidate.sstables))
             {
-                LeveledCompactionTask newTask = new LeveledCompactionTask(cfs, sstables, level, gcBefore, maxSSTableSizeInMB);
+                LeveledCompactionTask newTask = new LeveledCompactionTask(cfs, candidate.sstables, candidate.level, gcBefore, candidate.maxSSTableBytes);
                 newTask.setCompactionType(op);
                 return newTask;
             }
@@ -161,7 +163,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         }
     }
 
-    public long getMaxSSTableSize()
+    public long getMaxSSTableBytes()
     {
         return maxSSTableSizeInMB * 1024L * 1024L;
     }
@@ -227,7 +229,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
             }
 
             totalLength = length;
-            Collections.sort(this.sstables, SSTable.sstableComparator);
+            Collections.sort(this.sstables, SSTableReader.sstableComparator);
             sstableIterator = this.sstables.iterator();
             assert sstableIterator.hasNext(); // caller should check intersecting first
             currentScanner = sstableIterator.next().getScanner(range, CompactionManager.instance.getRateLimiter());

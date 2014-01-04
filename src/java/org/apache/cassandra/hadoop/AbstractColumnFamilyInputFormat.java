@@ -19,16 +19,18 @@ package org.apache.cassandra.hadoop;
 
 import java.io.IOException;
 import java.net.InetAddress;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.dht.IPartitioner;
@@ -53,11 +55,8 @@ import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.transport.TTransport;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.thrift.transport.TTransportException;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 
 public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<K, Y> implements org.apache.hadoop.mapred.InputFormat<K, Y>
 {
@@ -90,7 +89,15 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
     public static Cassandra.Client createAuthenticatedClient(String location, int port, Configuration conf) throws Exception
     {
         logger.debug("Creating authenticated client for CF input format");
-        TTransport transport = ConfigHelper.getClientTransportFactory(conf).openTransport(location, port, conf);
+        TTransport transport;
+        try
+        {
+            transport = ConfigHelper.getClientTransportFactory(conf).openTransport(location, port);
+        }
+        catch (Exception e)
+        {
+            throw new TTransportException("Failed to open a transport to " + location + ":" + port + ".", e);
+        }
         TProtocol binaryProtocol = new TBinaryProtocol(transport, true, true);
         Cassandra.Client client = new Cassandra.Client(binaryProtocol);
 
@@ -120,10 +127,11 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
         keyspace = ConfigHelper.getInputKeyspace(context.getConfiguration());
         cfName = ConfigHelper.getInputColumnFamily(context.getConfiguration());
         partitioner = ConfigHelper.getInputPartitioner(context.getConfiguration());
-        logger.debug("partitioner is " + partitioner);
+        logger.debug("partitioner is {}", partitioner);
+
 
         // cannonical ranges, split into pieces, fetching the splits in parallel
-        ExecutorService executor = Executors.newCachedThreadPool();
+        ExecutorService executor = new ThreadPoolExecutor(0, 128, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
         List<InputSplit> splits = new ArrayList<InputSplit>();
 
         try
@@ -249,7 +257,7 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
                                     subSplit.getRow_count(),
                                     endpoints);
 
-                    logger.debug("adding " + split);
+                    logger.debug("adding {}", split);
                     splits.add(split);
                 }
             }
@@ -289,7 +297,7 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
             }
             catch (IOException e)
             {
-                logger.debug("failed connect to endpoint " + host, e);
+                logger.debug("failed connect to endpoint {}", host, e);
             }
             catch (InvalidRequestException e)
             {
@@ -318,7 +326,7 @@ public abstract class AbstractColumnFamilyInputFormat<K, Y> extends InputFormat<
         List<TokenRange> map;
         try
         {
-            map = client.describe_ring(ConfigHelper.getInputKeyspace(conf));
+            map = client.describe_local_ring(ConfigHelper.getInputKeyspace(conf));
         }
         catch (InvalidRequestException e)
         {

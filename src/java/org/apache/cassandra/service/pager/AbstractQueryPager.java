@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.service.pager;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -26,6 +25,7 @@ import java.util.Iterator;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.filter.ColumnCounter;
 import org.apache.cassandra.db.filter.IDiskAtomFilter;
 import org.apache.cassandra.exceptions.RequestExecutionException;
@@ -40,9 +40,9 @@ abstract class AbstractQueryPager implements QueryPager
     protected final IDiskAtomFilter columnFilter;
     private final long timestamp;
 
-    private volatile int remaining;
-    private volatile boolean exhausted;
-    private volatile boolean lastWasRecorded;
+    private int remaining;
+    private boolean exhausted;
+    private boolean lastWasRecorded;
 
     protected AbstractQueryPager(ConsistencyLevel consistencyLevel,
                                  int toFetch,
@@ -77,6 +77,16 @@ abstract class AbstractQueryPager implements QueryPager
         }
 
         int liveCount = getPageLiveCount(rows);
+
+        // Because SP.getRangeSlice doesn't trim the result (see SP.trim()), liveCount may be greater than what asked
+        // (currentPageSize). This would throw off the paging logic so we trim the excess. It's not extremely efficient
+        // but most of the time there should be nothing or very little to trim.
+        if (liveCount > currentPageSize)
+        {
+            rows = discardLast(rows, liveCount - currentPageSize);
+            liveCount = currentPageSize;
+        }
+
         remaining -= liveCount;
 
         // If we've got less than requested, there is no more query to do (but
@@ -93,7 +103,7 @@ abstract class AbstractQueryPager implements QueryPager
             remaining++;
         }
         // Otherwise, if 'lastWasRecorded', we queried for one more than the page size,
-        // so if the page was is full, trim the last entry
+        // so if the page is full, trim the last entry
         else if (lastWasRecorded && !exhausted)
         {
             // We've asked for one more than necessary
@@ -116,7 +126,7 @@ abstract class AbstractQueryPager implements QueryPager
                 List<Row> newResult = new ArrayList<Row>(result.size() - 1);
                 for (Row row2 : result)
                 {
-                    if (row.cf == null || row.cf.getColumnCount() == 0)
+                    if (row2.cf == null || row2.cf.getColumnCount() == 0)
                         continue;
 
                     newResult.add(row2);
@@ -161,31 +171,78 @@ abstract class AbstractQueryPager implements QueryPager
     protected abstract List<Row> queryNextPage(int pageSize, ConsistencyLevel consistency, boolean localQuery) throws RequestValidationException, RequestExecutionException;
     protected abstract boolean containsPreviousLast(Row first);
     protected abstract boolean recordLast(Row last);
+    protected abstract boolean isReversed();
 
     private List<Row> discardFirst(List<Row> rows)
     {
-        Row first = rows.get(0);
-        ColumnFamily newCf = discardFirst(first.cf);
+        return discardFirst(rows, 1);
+    }
 
-        int count = newCf.getColumnCount();
-        List<Row> newRows = new ArrayList<Row>(count == 0 ? rows.size() - 1 : rows.size());
+    private List<Row> discardFirst(List<Row> rows, int toDiscard)
+    {
+        if (toDiscard == 0)
+            return rows;
+
+        int i = 0;
+        DecoratedKey firstKey = null;
+        ColumnFamily firstCf = null;
+        while (toDiscard > 0 && i < rows.size())
+        {
+            Row first = rows.get(i++);
+            firstKey = first.key;
+            firstCf = first.cf.cloneMeShallow();
+            toDiscard -= isReversed()
+                       ? discardLast(first.cf, toDiscard, firstCf)
+                       : discardFirst(first.cf, toDiscard, firstCf);
+        }
+
+        // If there is less live data than to discard, all is discarded
+        if (toDiscard > 0 && i >= rows.size())
+            return Collections.<Row>emptyList();
+
+        int count = firstCf.getColumnCount();
+        int newSize = rows.size() - i;
+        List<Row> newRows = new ArrayList<Row>(count == 0 ? newSize-1 : newSize);
         if (count != 0)
-            newRows.add(new Row(first.key, newCf));
-        newRows.addAll(rows.subList(1, rows.size()));
+            newRows.add(new Row(firstKey, firstCf));
+        newRows.addAll(rows.subList(i, rows.size()));
 
         return newRows;
     }
 
     private List<Row> discardLast(List<Row> rows)
     {
-        Row last = rows.get(rows.size() - 1);
-        ColumnFamily newCf = discardLast(last.cf);
+        return discardLast(rows, 1);
+    }
 
-        int count = newCf.getColumnCount();
-        List<Row> newRows = new ArrayList<Row>(count == 0 ? rows.size() - 1 : rows.size());
-        newRows.addAll(rows.subList(0, rows.size() - 1));
+    private List<Row> discardLast(List<Row> rows, int toDiscard)
+    {
+        if (toDiscard == 0)
+            return rows;
+
+        int i = rows.size()-1;
+        DecoratedKey lastKey = null;
+        ColumnFamily lastCf = null;
+        while (toDiscard > 0 && i >= 0)
+        {
+            Row last = rows.get(i--);
+            lastKey = last.key;
+            lastCf = last.cf.cloneMeShallow();
+            toDiscard -= isReversed()
+                       ? discardFirst(last.cf, toDiscard, lastCf)
+                       : discardLast(last.cf, toDiscard, lastCf);
+        }
+
+        // If there is less live data than to discard, all is discarded
+        if (toDiscard > 0 && i < 0)
+            return Collections.<Row>emptyList();
+
+        int count = lastCf.getColumnCount();
+        int newSize = i+1;
+        List<Row> newRows = new ArrayList<Row>(count == 0 ? newSize-1 : newSize);
+        newRows.addAll(rows.subList(0, i));
         if (count != 0)
-            newRows.add(new Row(last.key, newCf));
+            newRows.add(new Row(lastKey, lastCf));
 
         return newRows;
     }
@@ -198,54 +255,70 @@ abstract class AbstractQueryPager implements QueryPager
         return count;
     }
 
-    private ColumnFamily discardFirst(ColumnFamily cf)
+    private int discardFirst(ColumnFamily cf, int toDiscard, ColumnFamily newCf)
     {
-        ColumnFamily copy = cf.cloneMeShallow();
+        boolean isReversed = isReversed();
+        DeletionInfo.InOrderTester tester = cf.deletionInfo().inOrderTester(isReversed);
+        return isReversed
+             ? discardTail(cf, toDiscard, newCf, cf.reverseIterator(), tester)
+             : discardHead(cf, toDiscard, newCf, cf.iterator(), tester);
+    }
+
+    private int discardLast(ColumnFamily cf, int toDiscard, ColumnFamily newCf)
+    {
+        boolean isReversed = isReversed();
+        DeletionInfo.InOrderTester tester = cf.deletionInfo().inOrderTester(isReversed);
+        return isReversed
+             ? discardHead(cf, toDiscard, newCf, cf.reverseIterator(), tester)
+             : discardTail(cf, toDiscard, newCf, cf.iterator(), tester);
+    }
+
+    private int discardHead(ColumnFamily cf, int toDiscard, ColumnFamily copy, Iterator<Cell> iter, DeletionInfo.InOrderTester tester)
+    {
         ColumnCounter counter = columnCounter();
 
-        Iterator<Column> iter = cf.iterator();
-        DeletionInfo.InOrderTester tester = cf.inOrderDeletionTester();
-        // Discard the first live
+        // Discard the first 'toDiscard' live
         while (iter.hasNext())
         {
-            Column c = iter.next();
+            Cell c = iter.next();
             counter.count(c, tester);
-            if (counter.live() > 1)
+            if (counter.live() > toDiscard)
             {
                 copy.addColumn(c);
                 while (iter.hasNext())
                     copy.addColumn(iter.next());
             }
         }
-        return copy;
+        return Math.min(counter.live(), toDiscard);
     }
 
-    private ColumnFamily discardLast(ColumnFamily cf)
+    private int discardTail(ColumnFamily cf, int toDiscard, ColumnFamily copy, Iterator<Cell> iter, DeletionInfo.InOrderTester tester)
     {
-        ColumnFamily copy = cf.cloneMeShallow();
-        // Redoing the counting like that is not extremely efficient, but
-        // discardLast is only called in case of a race between paging and
-        // a deletion, which is pretty unlikely, so probably not a big deal
+        // Redoing the counting like that is not extremely efficient.
+        // This is called only for reversed slices or in the case of a race between
+        // paging and a deletion (pretty unlikely), so this is probably acceptable.
         int liveCount = columnCounter().countAll(cf).live();
 
         ColumnCounter counter = columnCounter();
-        DeletionInfo.InOrderTester tester = cf.inOrderDeletionTester();
-        // Discard the first live
-        for (Column c : cf)
+        // Discard the last 'toDiscard' live (so stop adding as sound as we're past 'liveCount - toDiscard')
+        while (iter.hasNext())
         {
+            Cell c = iter.next();
             counter.count(c, tester);
-            if (counter.live() < liveCount)
-                copy.addColumn(c);
+            if (counter.live() > liveCount - toDiscard)
+                break;
+
+            copy.addColumn(c);
         }
-        return copy;
+        return Math.min(liveCount, toDiscard);
     }
 
-    protected static ByteBuffer firstName(ColumnFamily cf)
+    protected static CellName firstName(ColumnFamily cf)
     {
         return cf.iterator().next().name();
     }
 
-    protected static ByteBuffer lastName(ColumnFamily cf)
+    protected static CellName lastName(ColumnFamily cf)
     {
         return cf.getReverseSortedColumns().iterator().next().name();
     }

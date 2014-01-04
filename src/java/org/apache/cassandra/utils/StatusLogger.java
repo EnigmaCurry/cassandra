@@ -72,9 +72,8 @@ public class StatusLogger
                                       threadPoolProxy.getTotalBlockedTasks()));
         }
         // one offs
-        CompactionManager cm = CompactionManager.instance;
         logger.info(String.format("%-25s%10s%10s",
-                                  "CompactionManager", cm.getActiveCompactions(), cm.getPendingTasks()));
+                                  "CompactionManager", CompactionManager.instance.getActiveCompactions(), CompactionManager.instance.getPendingTasks()));
         int pendingCommands = 0;
         for (int n : MessagingService.instance().getCommandPendingTasks().values())
         {
@@ -86,7 +85,7 @@ public class StatusLogger
             pendingResponses += n;
         }
         logger.info(String.format("%-25s%10s%10s",
-                                  "MessagingService", "n/a", pendingCommands + "," + pendingResponses));
+                                  "MessagingService", "n/a", pendingCommands + "/" + pendingResponses));
 
         // Global key/row cache information
         AutoSavingCache<KeyCacheKey, RowIndexEntry> keyCache = CacheService.instance.keyCache;

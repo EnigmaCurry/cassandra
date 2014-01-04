@@ -23,9 +23,8 @@ import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
-
-import com.google.common.base.Charsets;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,7 +64,7 @@ public class Ec2Snitch extends AbstractNetworkTopologySnitch
 
         String datacenterSuffix = SnitchProperties.get("dc_suffix", "");
         ec2region = ec2region.concat(datacenterSuffix);
-        logger.info("EC2Snitch using region: " + ec2region + ", zone: " + ec2zone + ".");
+        logger.info("EC2Snitch using region: {}, zone: {}.", ec2region, ec2zone);
     }
 
     String awsApiCall(String url) throws IOException, ConfigurationException
@@ -84,7 +83,7 @@ public class Ec2Snitch extends AbstractNetworkTopologySnitch
             byte[] b = new byte[cl];
             d = new DataInputStream((FilterInputStream) conn.getContent());
             d.readFully(b);
-            return new String(b, Charsets.UTF_8);
+            return new String(b, StandardCharsets.UTF_8);
         }
         finally
         {

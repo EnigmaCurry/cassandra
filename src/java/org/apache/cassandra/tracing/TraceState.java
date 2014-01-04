@@ -19,7 +19,6 @@ package org.apache.cassandra.tracing;
 
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -29,9 +28,13 @@ import org.slf4j.helpers.MessageFormatter;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.*;
-import org.apache.cassandra.service.StorageProxy;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.TreeMapBackedSortedColumns;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.UUIDGen;
+import org.apache.cassandra.utils.WrappedRunnable;
 
 /**
  * ThreadLocal state for a tracing session. The presence of an instance of this class as a ThreadLocal denotes that an
@@ -89,17 +92,16 @@ public class TraceState
 
         StageManager.getStage(Stage.TRACING).execute(new WrappedRunnable()
         {
-            public void runMayThrow() throws Exception
+            public void runMayThrow()
             {
                 CFMetaData cfMeta = CFMetaData.TraceEventsCf;
-                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfMeta);
+                ColumnFamily cf = TreeMapBackedSortedColumns.factory.create(cfMeta);
                 Tracing.addColumn(cf, Tracing.buildName(cfMeta, eventId, ByteBufferUtil.bytes("activity")), message);
                 Tracing.addColumn(cf, Tracing.buildName(cfMeta, eventId, ByteBufferUtil.bytes("source")), FBUtilities.getBroadcastAddress());
                 if (elapsed >= 0)
                     Tracing.addColumn(cf, Tracing.buildName(cfMeta, eventId, ByteBufferUtil.bytes("source_elapsed")), elapsed);
                 Tracing.addColumn(cf, Tracing.buildName(cfMeta, eventId, ByteBufferUtil.bytes("thread")), threadName);
-                RowMutation mutation = new RowMutation(Tracing.TRACE_KS, sessionIdBytes, cf);
-                StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
+                Tracing.mutateWithCatch(new Mutation(Tracing.TRACE_KS, sessionIdBytes, cf));
             }
         });
     }

@@ -35,7 +35,20 @@ public class Relation
 
     public static enum Type
     {
-        EQ, LT, LTE, GTE, GT, IN;
+        EQ, LT, LTE, GTE, GT, IN, CONTAINS, CONTAINS_KEY;
+
+        public boolean allowsIndexQuery()
+        {
+            switch (this)
+            {
+                case EQ:
+                case CONTAINS:
+                case CONTAINS_KEY:
+                    return true;
+                default:
+                    return false;
+            }
+        }
     }
 
     private Relation(ColumnIdentifier entity, Type type, Term.Raw value, List<Term.Raw> inValues, boolean onToken)
@@ -81,7 +94,7 @@ public class Relation
 
     public Term.Raw getValue()
     {
-        assert relationType != Type.IN;
+        assert relationType != Type.IN || value == null || value instanceof AbstractMarker.INRaw;
         return value;
     }
 

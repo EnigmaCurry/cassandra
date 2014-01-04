@@ -21,12 +21,19 @@ import java.io.*;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.zip.Checksum;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import net.jpountz.lz4.LZ4BlockInputStream;
+import net.jpountz.lz4.LZ4FastDecompressor;
+import net.jpountz.lz4.LZ4Factory;
+import net.jpountz.xxhash.XXHashFactory;
 import org.xerial.snappy.SnappyInputStream;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.UnknownColumnFamilyException;
 import org.apache.cassandra.gms.Gossiper;
 
 public class IncomingTcpConnection extends Thread
@@ -67,15 +74,21 @@ public class IncomingTcpConnection extends Thread
     {
         try
         {
-            if (version < MessagingService.VERSION_12)
-                handleLegacyVersion();
-            else
-                handleModernVersion();
+            if (version < MessagingService.VERSION_20)
+                throw new UnsupportedOperationException(String.format("Unable to read obsolete message version %s; "
+                                                                      + "The earliest version supported is 2.0.0",
+                                                                      version));
+
+            handleModernVersion();
         }
         catch (EOFException e)
         {
             logger.trace("eof reading from socket; closing", e);
             // connection will be reset so no need to throw an exception.
+        }
+        catch (UnknownColumnFamilyException e)
+        {
+            logger.warn("UnknownColumnFamilyException reading from socket; closing", e);
         }
         catch (IOException e)
         {
@@ -100,7 +113,16 @@ public class IncomingTcpConnection extends Thread
         if (compressed)
         {
             logger.debug("Upgrading incoming connection to be compressed");
-            in = new DataInputStream(new SnappyInputStream(socket.getInputStream()));
+            if (version < MessagingService.VERSION_21)
+                in = new DataInputStream(new SnappyInputStream(socket.getInputStream()));
+            else
+            {
+                LZ4FastDecompressor decompressor = LZ4Factory.fastestInstance().fastDecompressor();
+                Checksum checksum = XXHashFactory.fastestInstance().newStreamingHash32(OutboundTcpConnection.LZ4_HASH_SEED).asChecksum();
+                in = new DataInputStream(new LZ4BlockInputStream(socket.getInputStream(),
+                                                                 decompressor,
+                                                                 checksum));
+            }
         }
         else
         {
@@ -124,11 +146,6 @@ public class IncomingTcpConnection extends Thread
             MessagingService.validateMagic(in.readInt());
             receiveMessage(in, version);
         }
-    }
-
-    private void handleLegacyVersion()
-    {
-        throw new UnsupportedOperationException("Unable to read obsolete message version " + version + "; the earliest version supported is 1.2.0");
     }
 
     private InetAddress receiveMessage(DataInputStream input, int version) throws IOException

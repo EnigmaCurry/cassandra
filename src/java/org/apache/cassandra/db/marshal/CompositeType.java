@@ -27,11 +27,9 @@ import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
 
-import org.apache.cassandra.db.filter.ColumnSlice;
-import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
-import org.apache.cassandra.cql3.ColumnNameBuilder;
+import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.Relation;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.serializers.MarshalException;
@@ -87,7 +85,7 @@ public class CompositeType extends AbstractCompositeType
         return ct;
     }
 
-    private CompositeType(List<AbstractType<?>> types)
+    protected CompositeType(List<AbstractType<?>> types)
     {
         this.types = ImmutableList.copyOf(types);
     }
@@ -130,6 +128,23 @@ public class CompositeType extends AbstractCompositeType
             serialized[i] = buffer;
         }
         return build(serialized);
+    }
+
+    // Overriding the one of AbstractCompositeType because we can do a tad better
+    @Override
+    public ByteBuffer[] split(ByteBuffer name)
+    {
+        // Assume all components, we'll trunk the array afterwards if need be, but
+        // most names will be complete.
+        ByteBuffer[] l = new ByteBuffer[types.size()];
+        ByteBuffer bb = name.duplicate();
+        int i = 0;
+        while (bb.remaining() > 0)
+        {
+            l[i++] = getWithShortLength(bb);
+            bb.get(); // skip end-of-component
+        }
+        return i == l.length ? l : Arrays.copyOfRange(l, 0, i);
     }
 
     // Extract component idx from bb. Return null if there is not enough component.
@@ -193,21 +208,25 @@ public class CompositeType extends AbstractCompositeType
     }
 
     @Override
-    public boolean intersects(List<ByteBuffer> minColumnNames, List<ByteBuffer> maxColumnNames, SliceQueryFilter filter)
+    public boolean isValueCompatibleWith(AbstractType<?> previous)
     {
-        assert minColumnNames.size() == maxColumnNames.size();
-        for (ColumnSlice slice : filter.slices)
+        if (this == previous)
+            return true;
+
+        if (!(previous instanceof CompositeType))
+            return false;
+
+        // Extending with new components is fine
+        CompositeType cp = (CompositeType)previous;
+        if (types.size() < cp.types.size())
+            return false;
+
+        for (int i = 0; i < cp.types.size(); i++)
         {
-            ByteBuffer[] start = split(filter.isReversed() ? slice.finish : slice.start);
-            ByteBuffer[] finish = split(filter.isReversed() ? slice.start : slice.finish);
-            for (int i = 0; i < minColumnNames.size(); i++)
-            {
-                AbstractType<?> t = types.get(i);
-                ByteBuffer s = i < start.length ? start[i] : ByteBufferUtil.EMPTY_BYTE_BUFFER;
-                ByteBuffer f = i < finish.length ? finish[i] : ByteBufferUtil.EMPTY_BYTE_BUFFER;
-                if (!t.intersects(minColumnNames.get(i), maxColumnNames.get(i), s, f))
-                    return false;
-            }
+            AbstractType tprev = cp.types.get(i);
+            AbstractType tnew = types.get(i);
+            if (!tnew.isValueCompatibleWith(tprev))
+                return false;
         }
         return true;
     }
@@ -269,7 +288,7 @@ public class CompositeType extends AbstractCompositeType
         return out;
     }
 
-    public static class Builder implements ColumnNameBuilder
+    public static class Builder
     {
         private final CompositeType composite;
 
@@ -333,6 +352,11 @@ public class CompositeType extends AbstractCompositeType
         public Builder add(ByteBuffer bb)
         {
             return add(bb, Relation.Type.EQ);
+        }
+
+        public Builder add(ColumnIdentifier name)
+        {
+            return add(name.bytes);
         }
 
         public int componentCount()

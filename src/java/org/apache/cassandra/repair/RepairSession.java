@@ -102,15 +102,15 @@ public class RepairSession extends WrappedRunnable implements IEndpointStateChan
      * @param range range to repair
      * @param keyspace name of keyspace
      * @param isSequential true if performing repair on snapshots sequentially
-     * @param isLocal true if you want to perform repair only inside the data center
+     * @param dataCenters the data centers that should be part of the repair; null for all DCs
      * @param cfnames names of columnfamilies
      */
-    public RepairSession(Range<Token> range, String keyspace, boolean isSequential, boolean isLocal, String... cfnames)
+    public RepairSession(Range<Token> range, String keyspace, boolean isSequential, Collection<String> dataCenters, String... cfnames)
     {
-        this(UUIDGen.getTimeUUID(), range, keyspace, isSequential, isLocal, cfnames);
+        this(UUIDGen.getTimeUUID(), range, keyspace, isSequential, dataCenters, cfnames);
     }
 
-    public RepairSession(UUID id, Range<Token> range, String keyspace, boolean isSequential, boolean isLocal, String[] cfnames)
+    public RepairSession(UUID id, Range<Token> range, String keyspace, boolean isSequential, Collection<String> dataCenters, String[] cfnames)
     {
         this.id = id;
         this.isSequential = isSequential;
@@ -118,7 +118,7 @@ public class RepairSession extends WrappedRunnable implements IEndpointStateChan
         this.cfnames = cfnames;
         assert cfnames.length > 0 : "Repairing no column families seems pointless, doesn't it";
         this.range = range;
-        this.endpoints = ActiveRepairService.getNeighbors(keyspace, range, isLocal);
+        this.endpoints = ActiveRepairService.getNeighbors(keyspace, range, dataCenters);
     }
 
     public UUID getId()
@@ -159,7 +159,7 @@ public class RepairSession extends WrappedRunnable implements IEndpointStateChan
         assert job.desc.equals(desc);
         if (job.addTree(endpoint, tree) == 0)
         {
-            logger.debug("All response received for " + getId() + "/" + desc.columnFamily);
+            logger.debug("All response received for {}/{}", getId(), desc.columnFamily);
             if (!job.isFailed())
             {
                 syncingJobs.put(job.desc.columnFamily, job);
@@ -249,7 +249,7 @@ public class RepairSession extends WrappedRunnable implements IEndpointStateChan
             {
                 String message = String.format("Cannot proceed on repair because a neighbor (%s) is dead: session failed", endpoint);
                 differencingDone.signalAll();
-                logger.error(String.format("[repair #%s] ", getId()) + message);
+                logger.error("[repair #{}] {}", getId(), message);
                 throw new IOException(message);
             }
         }
@@ -318,6 +318,7 @@ public class RepairSession extends WrappedRunnable implements IEndpointStateChan
     }
 
     public void onJoin(InetAddress endpoint, EndpointState epState) {}
+    public void beforeChange(InetAddress endpoint, EndpointState currentState, ApplicationState newStateKey, VersionedValue newValue) {}
     public void onChange(InetAddress endpoint, ApplicationState state, VersionedValue value) {}
     public void onAlive(InetAddress endpoint, EndpointState state) {}
     public void onDead(InetAddress endpoint, EndpointState state) {}

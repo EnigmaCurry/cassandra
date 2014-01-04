@@ -283,6 +283,14 @@ public interface ColumnFamilyStoreMBean
 
     public boolean isAutoCompactionDisabled();
 
+    /** Number of tombstoned cells retreived during the last slicequery */
+    @Deprecated
+    public double getTombstonesPerSlice();
+
+    /** Number of live cells retreived during the last slicequery */
+    @Deprecated
+    public double getLiveCellsPerSlice();
+
     public long estimateKeys();
 
     /**
@@ -336,4 +344,9 @@ public interface ColumnFamilyStoreMBean
      * @return ratio
      */
     public double getDroppableTombstoneRatio();
+
+    /**
+     * @return the size of SSTables in "snapshots" subdirectory which aren't live anymore
+     */
+    public long trueSnapshotsSize();
 }

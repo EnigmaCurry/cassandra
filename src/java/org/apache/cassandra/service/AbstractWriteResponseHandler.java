@@ -38,7 +38,7 @@ public abstract class AbstractWriteResponseHandler implements IAsyncCallback
     protected final Keyspace keyspace;
     protected final long start;
     protected final Collection<InetAddress> naturalEndpoints;
-    protected final ConsistencyLevel consistencyLevel;
+    public final ConsistencyLevel consistencyLevel;
     protected final Runnable callback;
     protected final Collection<InetAddress> pendingEndpoints;
     private final WriteType writeType;
@@ -78,7 +78,16 @@ public abstract class AbstractWriteResponseHandler implements IAsyncCallback
         }
 
         if (!success)
-            throw new WriteTimeoutException(writeType, consistencyLevel, ackCount(), totalBlockFor());
+        {
+            int acks = ackCount();
+            int blockedFor = totalBlockFor();
+            // It's pretty unlikely, but we can race between exiting await above and here, so
+            // that we could now have enough acks. In that case, we "lie" on the acks count to
+            // avoid sending confusing info to the user (see CASSANDRA-).
+            if (acks >= blockedFor)
+                acks = blockedFor - 1;
+            throw new WriteTimeoutException(writeType, consistencyLevel, acks, blockedFor);
+        }
     }
 
     protected int totalBlockFor()

@@ -28,9 +28,9 @@ commands:
   - name: status
     help: |
       Print cluster information (state, load, IDs, ...)
-  - name: cfstats
+  - name: cfstats [keyspace].[cfname] ...
     help: |
-      Print statistics on column families
+      Print statistics on column families. Use the -i flag to ignore the list of column families and display the remaining cfs.
   - name: version
     help: |
       Print cassandra version
@@ -49,6 +49,9 @@ commands:
   - name: compactionstats
     help: |
       Print statistics on compactions
+  - name: compactionhistory
+    help: |
+      Print history of compaction
   - name: disablebinary
     help: |
       Disable native transport (binary protocol)
@@ -64,6 +67,9 @@ commands:
   - name: enablehandoff
     help: |
       Reenable the future hints storing on the current node
+  - name: truncatehints <host-name>
+    help: |
+        Truncate all hints on the local node, or truncate hints for the endpoint specified.
   - name: resumehandoff
     help: |
       Resume hints delivery process
@@ -144,7 +150,13 @@ commands:
       Flush one or more column families
   - name: repair [keyspace] [cfnames]
     help: |
-      Repair one or more column families (use -pr to repair only the first range returned by the partitioner)
+      Repair one or more column families
+         Use -dc to repair specific datacenters (csv list).
+         Use -et to specify a token at which repair range ends.
+         Use -local to only repair against nodes in the same datacenter.
+         Use -pr to repair only the first range returned by the partitioner.
+         Use -par to carry out a parallel repair.
+         Use -st to specify a token at which the repair range starts.
   - name: cleanup [keyspace] [cfnames]
     help: |
       Run cleanup on one or more column families
@@ -157,7 +169,7 @@ commands:
   - name: upgradesstables [-a|--include-all-sstables] [keyspace] [cfnames]
     help: |
       Rewrite sstables (for the requested column families) that are not on the current version (thus upgrading them to said current version).
-      Use -a to include all sstables, even those already on the current version.
+         Use -a to include all sstables, even those already on the current version.
   - name: setcompactionthreshold <keyspace> <cfname>
     help: |
       Set min and max compaction thresholds for a given column family
@@ -191,12 +203,15 @@ commands:
   - name: setcachecapacity <key-cache-capacity> <row-cache-capacity>
     help: |
       Set global key and row cache capacities (in MB units).
+  - name: setcachekeystosave <key-cache-keys-to-save> <row-cache-keys-to-save>
+    help: |
+      Set number of keys saved by each cache for faster post-restart warmup. 0 to disable.
   - name: getendpoints <keyspace> <cf> <key>
     help: |
       Print the end points that owns the key
   - name: getsstables <keyspace> <cf> <key>
     help: |
       Print the sstable filenames that own the key
-  - name: predictconsistency <replication_factor> <time> [versions] [latency_percentile]
+  - name: reloadtriggers
     help: |
-      Predict latency and consistency "t" ms after writes
+      reload trigger classes

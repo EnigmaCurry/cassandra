@@ -22,15 +22,11 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.google.common.collect.*;
-
-import org.apache.cassandra.utils.BiMultiValMap;
-import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.SortedBiMultiValMap;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,15 +36,22 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.BiMultiValMap;
+import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.SortedBiMultiValMap;
 
 public class TokenMetadata
 {
     private static final Logger logger = LoggerFactory.getLogger(TokenMetadata.class);
 
-    /* Maintains token to endpoint map of every node in the cluster. */
+    /**
+     * Maintains token to endpoint map of every node in the cluster.
+     * Each Token is associated with exactly one Address, but each Address may have
+     * multiple tokens.  Hence, the BiMultiValMap collection.
+     */
     private final BiMultiValMap<Token, InetAddress> tokenToEndpointMap;
 
-    /* Maintains endpoint to host ID map of every node in the cluster */
+    /** Maintains endpoint to host ID map of every node in the cluster */
     private final BiMap<InetAddress, UUID> endpointToHostIdMap;
 
     // Prior to CASSANDRA-603, we just had <tt>Map<Range, InetAddress> pendingRanges<tt>,
@@ -92,8 +95,6 @@ public class TokenMetadata
     private volatile ArrayList<Token> sortedTokens;
 
     private final Topology topology;
-    /* list of subscribers that are notified when the tokenToEndpointMap changed */
-    private final CopyOnWriteArrayList<AbstractReplicationStrategy> subscribers = new CopyOnWriteArrayList<AbstractReplicationStrategy>();
 
     private static final Comparator<InetAddress> inetaddressCmp = new Comparator<InetAddress>()
     {
@@ -102,6 +103,9 @@ public class TokenMetadata
             return ByteBuffer.wrap(o1.getAddress()).compareTo(ByteBuffer.wrap(o2.getAddress()));
         }
     };
+
+    // signals replication strategies that nodes have joined or left the ring and they need to recompute ownership
+    private volatile long ringVersion = 0;
 
     public TokenMetadata()
     {
@@ -194,7 +198,7 @@ public class TokenMetadata
                     if (!endpoint.equals(prev))
                     {
                         if (prev != null)
-                            logger.warn("Token " + token + " changing ownership from " + prev + " to " + endpoint);
+                            logger.warn("Token {} changing ownership from {} to {}", token, prev, endpoint);
                         shouldSortTokens = true;
                     }
                 }
@@ -221,43 +225,76 @@ public class TokenMetadata
         assert hostId != null;
         assert endpoint != null;
 
-        InetAddress storedEp = endpointToHostIdMap.inverse().get(hostId);
-        if (storedEp != null)
+        lock.writeLock().lock();
+        try
         {
-            if (!storedEp.equals(endpoint) && (FailureDetector.instance.isAlive(storedEp)))
+            InetAddress storedEp = endpointToHostIdMap.inverse().get(hostId);
+            if (storedEp != null)
             {
-                throw new RuntimeException(String.format("Host ID collision between active endpoint %s and %s (id=%s)",
-                                                         storedEp,
-                                                         endpoint,
-                                                         hostId));
+                if (!storedEp.equals(endpoint) && (FailureDetector.instance.isAlive(storedEp)))
+                {
+                    throw new RuntimeException(String.format("Host ID collision between active endpoint %s and %s (id=%s)",
+                                                             storedEp,
+                                                             endpoint,
+                                                             hostId));
+                }
             }
+
+            UUID storedId = endpointToHostIdMap.get(endpoint);
+            if ((storedId != null) && (!storedId.equals(hostId)))
+                logger.warn("Changing {}'s host ID from {} to {}", endpoint, storedId, hostId);
+    
+            endpointToHostIdMap.forcePut(endpoint, hostId);
+        }
+        finally
+        {
+            lock.writeLock().unlock();
         }
 
-        UUID storedId = endpointToHostIdMap.get(endpoint);
-        if ((storedId != null) && (!storedId.equals(hostId)))
-            logger.warn("Changing {}'s host ID from {} to {}", new Object[] {endpoint, storedId, hostId});
-
-        endpointToHostIdMap.forcePut(endpoint, hostId);
     }
 
     /** Return the unique host ID for an end-point. */
     public UUID getHostId(InetAddress endpoint)
     {
-        return endpointToHostIdMap.get(endpoint);
+        lock.readLock().lock();
+        try
+        {
+            return endpointToHostIdMap.get(endpoint);
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 
     /** Return the end-point for a unique host ID */
     public InetAddress getEndpointForHostId(UUID hostId)
     {
-        return endpointToHostIdMap.inverse().get(hostId);
+        lock.readLock().lock();
+        try
+        {
+            return endpointToHostIdMap.inverse().get(hostId);
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 
     /** @return a copy of the endpoint-to-id map for read-only operations */
     public Map<InetAddress, UUID> getEndpointToHostIdMapForReading()
     {
-        Map<InetAddress, UUID> readMap = new HashMap<InetAddress, UUID>();
-        readMap.putAll(endpointToHostIdMap);
-        return readMap;
+        lock.readLock().lock();
+        try
+        {
+            Map<InetAddress, UUID> readMap = new HashMap<InetAddress, UUID>();
+            readMap.putAll(endpointToHostIdMap);
+            return readMap;
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 
     @Deprecated
@@ -391,7 +428,7 @@ public class TokenMetadata
             leavingEndpoints.remove(endpoint);
             endpointToHostIdMap.remove(endpoint);
             sortedTokens = sortTokens();
-            invalidateCaches();
+            invalidateCachedRings();
         }
         finally
         {
@@ -419,7 +456,7 @@ public class TokenMetadata
                 }
             }
 
-            invalidateCaches();
+            invalidateCachedRings();
         }
         finally
         {
@@ -549,6 +586,8 @@ public class TokenMetadata
         }
     }
 
+    private final AtomicReference<TokenMetadata> cachedTokenMap = new AtomicReference<TokenMetadata>();
+
     /**
      * Create a copy of TokenMetadata with only tokenToEndpointMap. That is, pending ranges,
      * bootstrap tokens and leaving endpoints are not included in the copy.
@@ -565,6 +604,31 @@ public class TokenMetadata
         finally
         {
             lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return a cached TokenMetadata with only tokenToEndpointMap, i.e., the same as cloneOnlyTokenMap but
+     * uses a cached copy that is invalided when the ring changes, so in the common case
+     * no extra locking is required.
+     *
+     * Callers must *NOT* mutate the returned metadata object.
+     */
+    public TokenMetadata cachedOnlyTokenMap()
+    {
+        TokenMetadata tm = cachedTokenMap.get();
+        if (tm != null)
+            return tm;
+
+        // synchronize to prevent thundering herd (CASSANDRA-6345)
+        synchronized (this)
+        {
+            if ((tm = cachedTokenMap.get()) != null)
+                return tm;
+
+            tm = cloneOnlyTokenMap();
+            cachedTokenMap.set(tm);
+            return tm;
         }
     }
 
@@ -725,13 +789,29 @@ public class TokenMetadata
 
     public Set<InetAddress> getAllEndpoints()
     {
-        return endpointToHostIdMap.keySet();
+        lock.readLock().lock();
+        try
+        {
+            return ImmutableSet.copyOf(endpointToHostIdMap.keySet());
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 
     /** caller should not modify leavingEndpoints */
     public Set<InetAddress> getLeavingEndpoints()
     {
-        return leavingEndpoints;
+        lock.readLock().lock();
+        try
+        {
+            return ImmutableSet.copyOf(leavingEndpoints);
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 
     /**
@@ -740,7 +820,15 @@ public class TokenMetadata
      */
     public Set<Pair<Token, InetAddress>> getMovingEndpoints()
     {
-        return movingEndpoints;
+        lock.readLock().lock();
+        try
+        {
+            return ImmutableSet.copyOf(movingEndpoints);
+        }
+        finally
+        {
+            lock.readLock().unlock();
+        }
     }
 
     /**
@@ -815,13 +903,21 @@ public class TokenMetadata
     /** used by tests */
     public void clearUnsafe()
     {
-        bootstrapTokens.clear();
-        tokenToEndpointMap.clear();
-        topology.clear();
-        leavingEndpoints.clear();
-        pendingRanges.clear();
-        endpointToHostIdMap.clear();
-        invalidateCaches();
+        lock.writeLock().lock();
+        try
+        {
+            bootstrapTokens.clear();
+            tokenToEndpointMap.clear();
+            topology.clear();
+            leavingEndpoints.clear();
+            pendingRanges.clear();
+            endpointToHostIdMap.clear();
+            invalidateCachedRings();
+        }
+        finally
+        {
+            lock.writeLock().unlock();
+        }
     }
 
     public String toString()
@@ -908,24 +1004,6 @@ public class TokenMetadata
         return sb.toString();
     }
 
-    public void invalidateCaches()
-    {
-        for (AbstractReplicationStrategy subscriber : subscribers)
-        {
-            subscriber.invalidateCachedTokenEndpointValues();
-        }
-    }
-
-    public void register(AbstractReplicationStrategy subscriber)
-    {
-        subscribers.add(subscriber);
-    }
-
-    public void unregister(AbstractReplicationStrategy subscriber)
-    {
-        subscribers.remove(subscriber);
-    }
-
     public Collection<InetAddress> pendingEndpointsFor(Token token, String keyspaceName)
     {
         Map<Range<Token>, Collection<InetAddress>> ranges = getPendingRanges(keyspaceName);
@@ -947,9 +1025,7 @@ public class TokenMetadata
      */
     public Collection<InetAddress> getWriteEndpoints(Token token, String keyspaceName, Collection<InetAddress> naturalEndpoints)
     {
-        ArrayList<InetAddress> endpoints = new ArrayList<InetAddress>();
-        Iterables.addAll(endpoints, Iterables.concat(naturalEndpoints, pendingEndpointsFor(token, keyspaceName)));
-        return endpoints;
+        return ImmutableList.copyOf(Iterables.concat(naturalEndpoints, pendingEndpointsFor(token, keyspaceName)));
     }
 
     /** @return an endpoint to token multimap representation of tokenToEndpointMap (a copy) */
@@ -999,6 +1075,17 @@ public class TokenMetadata
     {
         assert this != StorageService.instance.getTokenMetadata();
         return topology;
+    }
+
+    public long getRingVersion()
+    {
+        return ringVersion;
+    }
+
+    public void invalidateCachedRings()
+    {
+        ringVersion++;
+        cachedTokenMap.set(null);
     }
 
     /**

@@ -49,6 +49,12 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
     public static final IFailureDetector instance = new FailureDetector();
     private static final Logger logger = LoggerFactory.getLogger(FailureDetector.class);
 
+    // this is useless except to provide backwards compatibility in phi_convict_threshold,
+    // because everyone seems pretty accustomed to the default of 8, and users who have
+    // already tuned their phi_convict_threshold for their own environments won't need to
+    // change.
+    private final double PHI_FACTOR = 1.0 / Math.log(10.0); // 0.434...
+
     private final Map<InetAddress, ArrivalWindow> arrivalSamples = new Hashtable<InetAddress, ArrivalWindow>();
     private final List<IFailureDetectionEventListener> fdEvntListeners = new CopyOnWriteArrayList<IFailureDetectionEventListener>();
 
@@ -88,6 +94,28 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
                 nodesStatus.put(entry.getKey().toString(), "DOWN");
         }
         return nodesStatus;
+    }
+
+    public int getDownEndpointCount()
+    {
+        int count = 0;
+        for (Map.Entry<InetAddress, EndpointState> entry : Gossiper.instance.endpointStateMap.entrySet())
+        {
+            if (!entry.getValue().isAlive())
+                count++;
+        }
+        return count;
+    }
+
+    public int getUpEndpointCount()
+    {
+        int count = 0;
+        for (Map.Entry<InetAddress, EndpointState> entry : Gossiper.instance.endpointStateMap.entrySet())
+        {
+            if (entry.getValue().isAlive())
+                count++;
+        }
+        return count;
     }
 
     public String getEndpointState(String address) throws UnknownHostException
@@ -151,29 +179,27 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
         // it's worth being defensive here so minor bugs don't cause disproportionate
         // badness.  (See CASSANDRA-1463 for an example).
         if (epState == null)
-            logger.error("unknown endpoint " + ep);
+            logger.error("unknown endpoint {}", ep);
         return epState != null && epState.isAlive();
-    }
-
-    public void clear(InetAddress ep)
-    {
-        ArrivalWindow heartbeatWindow = arrivalSamples.get(ep);
-        if (heartbeatWindow != null)
-            heartbeatWindow.clear();
     }
 
     public void report(InetAddress ep)
     {
         if (logger.isTraceEnabled())
             logger.trace("reporting {}", ep);
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         ArrivalWindow heartbeatWindow = arrivalSamples.get(ep);
         if (heartbeatWindow == null)
         {
+            // avoid adding an empty ArrivalWindow to the Map
             heartbeatWindow = new ArrivalWindow(SAMPLE_SIZE);
+            heartbeatWindow.add(now);
             arrivalSamples.put(ep, heartbeatWindow);
         }
-        heartbeatWindow.add(now);
+        else
+        {
+            heartbeatWindow.add(now);
+        }
     }
 
     public void interpret(InetAddress ep)
@@ -183,12 +209,12 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
         {
             return;
         }
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         double phi = hbWnd.phi(now);
         if (logger.isTraceEnabled())
             logger.trace("PHI for " + ep + " : " + phi);
 
-        if (phi > getPhiConvictThreshold())
+        if (PHI_FACTOR * phi > getPhiConvictThreshold())
         {
             logger.trace("notifying listeners that {} is down", ep);
             logger.trace("intervals: {} mean: {}", hbWnd, hbWnd.mean());
@@ -248,7 +274,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
 class ArrivalWindow
 {
     private static final Logger logger = LoggerFactory.getLogger(ArrivalWindow.class);
-    private double tLast = 0L;
+    private long tLast = 0L;
     private final BoundedStatsDeque arrivalIntervals;
 
     // this is useless except to provide backwards compatibility in phi_convict_threshold,
@@ -257,31 +283,36 @@ class ArrivalWindow
     // change.
     private final double PHI_FACTOR = 1.0 / Math.log(10.0);
 
+    private static final long MILLI_TO_NANO = 1000000L;
+
     // in the event of a long partition, never record an interval longer than the rpc timeout,
     // since if a host is regularly experiencing connectivity problems lasting this long we'd
     // rather mark it down quickly instead of adapting
-    private final double MAX_INTERVAL_IN_MS = DatabaseDescriptor.getRpcTimeout();
+    private final long MAX_INTERVAL_IN_NANO = DatabaseDescriptor.getRpcTimeout() * MILLI_TO_NANO;
 
     ArrivalWindow(int size)
     {
         arrivalIntervals = new BoundedStatsDeque(size);
     }
 
-    synchronized void add(double value)
+    synchronized void add(long value)
     {
-        double interArrivalTime;
+        assert tLast >= 0;
         if (tLast > 0L)
         {
-            interArrivalTime = (value - tLast);
+            long interArrivalTime = (value - tLast);
+            if (interArrivalTime <= MAX_INTERVAL_IN_NANO)
+                arrivalIntervals.add(interArrivalTime);
+            else
+                logger.debug("Ignoring interval time of {}", interArrivalTime);
         }
         else
         {
-            interArrivalTime = Gossiper.intervalInMillis / 2;
+            // We use a very large initial interval since the "right" average depends on the cluster size
+            // and it's better to err high (false negatives, which will be corrected by waiting a bit longer)
+            // than low (false positives, which cause "flapping").
+            arrivalIntervals.add(Gossiper.intervalInMillis * MILLI_TO_NANO * 30);
         }
-        if (interArrivalTime <= MAX_INTERVAL_IN_MS)
-            arrivalIntervals.add(interArrivalTime);
-        else
-            logger.debug("Ignoring interval time of {}", interArrivalTime);
         tLast = value;
     }
 
@@ -290,19 +321,12 @@ class ArrivalWindow
         return arrivalIntervals.mean();
     }
 
-    void clear()
-    {
-        arrivalIntervals.clear();
-    }
-
     // see CASSANDRA-2597 for an explanation of the math at work here.
     double phi(long tnow)
     {
-        int size = arrivalIntervals.size();
-        double t = tnow - tLast;
-        return (size > 0)
-               ? PHI_FACTOR * t / mean()
-               : 0.0;
+        assert arrivalIntervals.size() > 0 && tLast > 0; // should not be called before any samples arrive
+        long t = tnow - tLast;
+        return t / mean();
     }
 
     public String toString()

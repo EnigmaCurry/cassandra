@@ -17,13 +17,16 @@
  */
 package org.apache.cassandra.db;
 
-import java.io.*;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -35,13 +38,14 @@ import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.DebuggableScheduledThreadPoolExecutor;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.marshal.LongType;
-import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
@@ -70,6 +74,8 @@ public class BatchlogManager implements BatchlogManagerMBean
     private final AtomicLong totalBatchesReplayed = new AtomicLong();
     private final AtomicBoolean isReplaying = new AtomicBoolean();
 
+    private static final ScheduledExecutorService batchlogTasks = new DebuggableScheduledThreadPoolExecutor("BatchlogTasks");
+    
     public void start()
     {
         MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
@@ -89,7 +95,8 @@ public class BatchlogManager implements BatchlogManagerMBean
                 replayAllFailedBatches();
             }
         };
-        StorageService.optionalTasks.scheduleWithFixedDelay(runnable, StorageService.RING_DELAY, REPLAY_INTERVAL, TimeUnit.MILLISECONDS);
+
+        batchlogTasks.scheduleWithFixedDelay(runnable, StorageService.RING_DELAY, REPLAY_INTERVAL, TimeUnit.MILLISECONDS);
     }
 
     public int countAllBatches()
@@ -111,24 +118,24 @@ public class BatchlogManager implements BatchlogManagerMBean
                 replayAllFailedBatches();
             }
         };
-        StorageService.optionalTasks.execute(runnable);
+        batchlogTasks.execute(runnable);
     }
 
-    public static RowMutation getBatchlogMutationFor(Collection<RowMutation> mutations, UUID uuid)
+    public static Mutation getBatchlogMutationFor(Collection<Mutation> mutations, UUID uuid)
     {
         long timestamp = FBUtilities.timestampMicros();
         ByteBuffer writtenAt = LongType.instance.decompose(timestamp / 1000);
-        ByteBuffer data = serializeRowMutations(mutations);
+        ByteBuffer data = serializeMutations(mutations);
 
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(CFMetaData.BatchlogCf);
-        cf.addColumn(new Column(columnName(""), ByteBufferUtil.EMPTY_BYTE_BUFFER, timestamp));
-        cf.addColumn(new Column(columnName("data"), data, timestamp));
-        cf.addColumn(new Column(columnName("written_at"), writtenAt, timestamp));
+        cf.addColumn(new Cell(cellName(""), ByteBufferUtil.EMPTY_BYTE_BUFFER, timestamp));
+        cf.addColumn(new Cell(cellName("data"), data, timestamp));
+        cf.addColumn(new Cell(cellName("written_at"), writtenAt, timestamp));
 
-        return new RowMutation(Keyspace.SYSTEM_KS, UUIDType.instance.decompose(uuid), cf);
+        return new Mutation(Keyspace.SYSTEM_KS, UUIDType.instance.decompose(uuid), cf);
     }
 
-    private static ByteBuffer serializeRowMutations(Collection<RowMutation> mutations)
+    private static ByteBuffer serializeMutations(Collection<Mutation> mutations)
     {
         FastByteArrayOutputStream bos = new FastByteArrayOutputStream();
         DataOutputStream out = new DataOutputStream(bos);
@@ -136,8 +143,8 @@ public class BatchlogManager implements BatchlogManagerMBean
         try
         {
             out.writeInt(mutations.size());
-            for (RowMutation rm : mutations)
-                RowMutation.serializer.serialize(rm, out, VERSION);
+            for (Mutation mutation : mutations)
+                Mutation.serializer.serialize(mutation, out, VERSION);
         }
         catch (IOException e)
         {
@@ -197,14 +204,14 @@ public class BatchlogManager implements BatchlogManagerMBean
         DataInputStream in = new DataInputStream(ByteBufferUtil.inputStream(data));
         int size = in.readInt();
         for (int i = 0; i < size; i++)
-            replaySerializedMutation(RowMutation.serializer.deserialize(in, VERSION), writtenAt);
+            replaySerializedMutation(Mutation.serializer.deserialize(in, VERSION), writtenAt);
     }
 
     /*
      * We try to deliver the mutations to the replicas ourselves if they are alive and only resort to writing hints
      * when a replica is down or a write request times out.
      */
-    private void replaySerializedMutation(RowMutation mutation, long writtenAt)
+    private void replaySerializedMutation(Mutation mutation, long writtenAt)
     {
         int ttl = calculateHintTTL(mutation, writtenAt);
         if (ttl <= 0)
@@ -228,7 +235,7 @@ public class BatchlogManager implements BatchlogManagerMBean
             attemptDirectDelivery(mutation, writtenAt, liveEndpoints);
     }
 
-    private void attemptDirectDelivery(RowMutation mutation, long writtenAt, Set<InetAddress> endpoints)
+    private void attemptDirectDelivery(Mutation mutation, long writtenAt, Set<InetAddress> endpoints)
     {
         List<WriteResponseHandler> handlers = Lists.newArrayList();
         final CopyOnWriteArraySet<InetAddress> undelivered = new CopyOnWriteArraySet<InetAddress>(endpoints);
@@ -270,14 +277,14 @@ public class BatchlogManager implements BatchlogManagerMBean
 
     // calculate ttl for the mutation's hint (and reduce ttl by the time the mutation spent in the batchlog).
     // this ensures that deletes aren't "undone" by an old batch replay.
-    private int calculateHintTTL(RowMutation mutation, long writtenAt)
+    private int calculateHintTTL(Mutation mutation, long writtenAt)
     {
         return (int) ((HintedHandOffManager.calculateHintTTL(mutation) * 1000 - (System.currentTimeMillis() - writtenAt)) / 1000);
     }
 
-    private static ByteBuffer columnName(String name)
+    private static CellName cellName(String name)
     {
-        return CFMetaData.BatchlogCf.getCfDef().getColumnNameBuilder().add(UTF8Type.instance.decompose(name)).build();
+        return CFMetaData.BatchlogCf.comparator.makeCellName(name);
     }
 
     // force flush + compaction to reclaim space from the replayed batches

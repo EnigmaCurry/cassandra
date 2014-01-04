@@ -18,7 +18,6 @@
 package org.apache.cassandra.cache;
 
 import java.io.*;
-import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
@@ -30,7 +29,6 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -43,7 +41,6 @@ import org.apache.cassandra.io.util.LengthAvailableInputStream;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
 public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K, V>
@@ -104,36 +101,8 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
         int count = 0;
         long start = System.nanoTime();
 
-        // old cache format that only saves keys
-        File path = getCachePath(cfs.keyspace.getName(), cfs.name, null);
-        if (path.exists())
-        {
-            DataInputStream in = null;
-            try
-            {
-                logger.info(String.format("reading saved cache %s", path));
-                in = new DataInputStream(new LengthAvailableInputStream(new BufferedInputStream(new FileInputStream(path)), path.length()));
-                Set<ByteBuffer> keys = new HashSet<ByteBuffer>();
-                while (in.available() > 0)
-                {
-                    keys.add(ByteBufferUtil.readWithLength(in));
-                    count++;
-                }
-                cacheLoader.load(keys, cfs);
-            }
-            catch (Exception e)
-            {
-                logger.debug(String.format("harmless error reading saved cache %s fully, keys loaded so far: %d", path.getAbsolutePath(), count), e);
-                return count;
-            }
-            finally
-            {
-                FileUtils.closeQuietly(in);
-            }
-        }
-
         // modern format, allows both key and value (so key cache load can be purely sequential)
-        path = getCachePath(cfs.keyspace.getName(), cfs.name, CURRENT_VERSION);
+        File path = getCachePath(cfs.keyspace.getName(), cfs.name, CURRENT_VERSION);
         if (path.exists())
         {
             DataInputStream in = null;
@@ -199,7 +168,7 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
             else
                 type = OperationType.UNKNOWN;
 
-            info = new CompactionInfo(new CFMetaData(Keyspace.SYSTEM_KS, cacheType.toString(), ColumnFamilyType.Standard, BytesType.instance, null),
+            info = new CompactionInfo(CFMetaData.denseCFMetaData(Keyspace.SYSTEM_KS, cacheType.toString(), BytesType.instance),
                                       type,
                                       0,
                                       keys.size(),
@@ -288,22 +257,18 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
         private void deleteOldCacheFiles()
         {
             File savedCachesDir = new File(DatabaseDescriptor.getSavedCachesLocation());
+            assert savedCachesDir.exists() && savedCachesDir.isDirectory();
 
-            if (savedCachesDir.exists() && savedCachesDir.isDirectory())
+            for (File file : savedCachesDir.listFiles())
             {
-                for (File file : savedCachesDir.listFiles())
-                {
-                    if (file.isFile() && file.getName().endsWith(cacheType.toString()))
-                    {
-                        if (!file.delete())
-                            logger.warn("Failed to delete {}", file.getAbsolutePath());
-                    }
+                if (!file.isFile())
+                    continue; // someone's been messing with our directory.  naughty!
 
-                    if (file.isFile() && file.getName().endsWith(CURRENT_VERSION + ".db"))
-                    {
-                        if (!file.delete())
-                            logger.warn("Failed to delete {}", file.getAbsolutePath());
-                    }
+                if (file.getName().endsWith(cacheType.toString())
+                    || file.getName().endsWith(String.format("%s-%s.db", cacheType.toString(), CURRENT_VERSION)))
+                {
+                    if (!file.delete())
+                        logger.warn("Failed to delete {}", file.getAbsolutePath());
                 }
             }
         }
@@ -314,8 +279,5 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
         void serialize(K key, DataOutput out) throws IOException;
 
         Future<Pair<K, V>> deserialize(DataInputStream in, ColumnFamilyStore cfs) throws IOException;
-
-        @Deprecated
-        void load(Set<ByteBuffer> buffer, ColumnFamilyStore cfs);
     }
 }

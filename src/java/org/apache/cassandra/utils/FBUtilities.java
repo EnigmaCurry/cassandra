@@ -70,6 +70,8 @@ public class FBUtilities
     public static final BigInteger TWO = new BigInteger("2");
     private static final String DEFAULT_TRIGGER_DIR = "triggers";
 
+    private static final String OPERATING_SYSTEM = System.getProperty("os.name").toLowerCase();
+
     private static volatile InetAddress localInetAddress;
     private static volatile InetAddress broadcastInetAddress;
 
@@ -464,11 +466,11 @@ public class FBUtilities
         }
         catch (ClassNotFoundException e)
         {
-            throw new ConfigurationException(String.format("Unable to find %s class '%s'", readable, classname));
+            throw new ConfigurationException(String.format("Unable to find %s class '%s'", readable, classname), e);
         }
         catch (NoClassDefFoundError e)
         {
-            throw new ConfigurationException(String.format("Unable to find %s class '%s'", readable, classname));
+            throw new ConfigurationException(String.format("Unable to find %s class '%s'", readable, classname), e);
         }
     }
 
@@ -502,9 +504,11 @@ public class FBUtilities
         }
     }
 
-    public static <T extends Comparable> SortedSet<T> singleton(T column)
+    public static <T> SortedSet<T> singleton(T column, Comparator<? super T> comparator)
     {
-        return new TreeSet<T>(Arrays.asList(column));
+        SortedSet<T> s = new TreeSet<T>(comparator);
+        s.add(column);
+        return s;
     }
 
     public static String toString(Map<?,?> map)
@@ -679,5 +683,10 @@ public class FBUtilities
         File historyDir = new File(System.getProperty("user.home"), ".cassandra");
         FileUtils.createDirectory(historyDir);
         return historyDir;
+    }
+
+    public static boolean isUnix()
+    {
+        return OPERATING_SYSTEM.contains("nix") || OPERATING_SYSTEM.contains("nux") || OPERATING_SYSTEM.contains("aix");
     }
 }

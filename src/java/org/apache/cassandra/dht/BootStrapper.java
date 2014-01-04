@@ -92,7 +92,7 @@ public class BootStrapper
      * otherwise, if num_tokens == 1, pick a token to assume half the load of the most-loaded node.
      * else choose num_tokens tokens at random
      */
-    public static Collection<Token> getBootstrapTokens(final TokenMetadata metadata, Map<InetAddress, Double> load) throws ConfigurationException
+    public static Collection<Token> getBootstrapTokens(final TokenMetadata metadata) throws ConfigurationException
     {
         Collection<String> initialTokens = DatabaseDescriptor.getInitialTokens();
         // if user specified tokens, use those
@@ -104,7 +104,7 @@ public class BootStrapper
             {
                 Token token = StorageService.getPartitioner().getTokenFactory().fromString(tokenString);
                 if (metadata.getEndpoint(token) != null)
-                    throw new ConfigurationException("Bootstraping to existing token " + tokenString + " is not allowed (decommission/removetoken the old node first).");
+                    throw new ConfigurationException("Bootstrapping to existing token " + tokenString + " is not allowed (decommission/removenode the old node first).");
                 tokens.add(token);
             }
             return tokens;

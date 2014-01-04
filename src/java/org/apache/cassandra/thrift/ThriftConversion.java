@@ -17,6 +17,10 @@
  */
 package org.apache.cassandra.thrift;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 import org.apache.cassandra.db.WriteType;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestTimeoutException;
@@ -41,6 +45,7 @@ public class ThriftConversion
             case LOCAL_QUORUM: return org.apache.cassandra.db.ConsistencyLevel.LOCAL_QUORUM;
             case EACH_QUORUM: return org.apache.cassandra.db.ConsistencyLevel.EACH_QUORUM;
             case SERIAL: return org.apache.cassandra.db.ConsistencyLevel.SERIAL;
+            case LOCAL_ONE: return org.apache.cassandra.db.ConsistencyLevel.LOCAL_ONE;
         }
         throw new AssertionError();
     }
@@ -56,11 +61,6 @@ public class ThriftConversion
     }
 
     public static InvalidRequestException toThrift(RequestValidationException e)
-    {
-        return new InvalidRequestException(e.getMessage());
-    }
-
-    public static InvalidRequestException toThrift(org.apache.cassandra.exceptions.InvalidRequestException e)
     {
         return new InvalidRequestException(e.getMessage());
     }
@@ -90,5 +90,23 @@ public class ThriftConversion
                 toe.setPaxos_in_progress(true);
         }
         return toe;
+    }
+
+    public static List<org.apache.cassandra.db.IndexExpression> fromThrift(List<IndexExpression> exprs)
+    {
+        if (exprs == null)
+            return null;
+
+        if (exprs.isEmpty())
+            return Collections.emptyList();
+
+        List<org.apache.cassandra.db.IndexExpression> converted = new ArrayList<>(exprs.size());
+        for (IndexExpression expr : exprs)
+        {
+            converted.add(new org.apache.cassandra.db.IndexExpression(expr.column_name,
+                                                                      org.apache.cassandra.db.IndexExpression.Operator.findByOrdinal(expr.op.getValue()),
+                                                                      expr.value));
+        }
+        return converted;
     }
 }

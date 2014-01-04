@@ -52,11 +52,11 @@ public class Config
 
     public volatile Long request_timeout_in_ms = new Long(10000);
 
-    public Long read_request_timeout_in_ms = new Long(10000);
+    public Long read_request_timeout_in_ms = new Long(5000);
 
     public Long range_request_timeout_in_ms = new Long(10000);
 
-    public Long write_request_timeout_in_ms = new Long(10000);
+    public Long write_request_timeout_in_ms = new Long(2000);
 
     public Long cas_contention_timeout_in_ms = new Long(1000);
 
@@ -84,6 +84,7 @@ public class Config
     public Boolean start_rpc = true;
     public String rpc_address;
     public Integer rpc_port = 9160;
+    public Integer rpc_listen_backlog = 50;
     public String rpc_server_type = "sync";
     public Boolean rpc_keepalive = true;
     public Integer rpc_min_threads = 16;
@@ -96,6 +97,7 @@ public class Config
     public Boolean start_native_transport = false;
     public Integer native_transport_port = 9042;
     public Integer native_transport_max_threads = 128;
+    public Integer native_transport_max_frame_size_in_mb = 256;
 
     @Deprecated
     public Integer thrift_max_message_length_in_mb = 16;
@@ -109,7 +111,6 @@ public class Config
     public Integer in_memory_compaction_limit_in_mb = 64;
     public Integer concurrent_compactors = FBUtilities.getAvailableProcessors();
     public volatile Integer compaction_throughput_mb_per_sec = 16;
-    public Boolean multithreaded_compaction = false;
 
     public Integer max_streaming_retries = 3;
 
@@ -126,6 +127,7 @@ public class Config
     public Double commitlog_sync_batch_window_in_ms;
     public Integer commitlog_sync_period_in_ms;
     public int commitlog_segment_size_in_mb = 32;
+    public int commitlog_periodic_queue_size = 1024 * FBUtilities.getAvailableProcessors();
 
     public String endpoint_snitch;
     public Boolean dynamic_snitch = true;
@@ -166,15 +168,23 @@ public class Config
     public String memory_allocator = NativeAllocator.class.getSimpleName();
     public boolean populate_io_cache_on_flush = false;
 
-    public boolean inter_dc_tcp_nodelay = false;
-
     private static boolean isClientMode = false;
 
     public boolean preheat_kernel_page_cache = false;
 
+    public Integer file_cache_size_in_mb;
+
+    public boolean inter_dc_tcp_nodelay = true;
+
     public String memtable_allocator = "SlabAllocator";
 
     private static boolean outboundBindAny = false;
+
+    public volatile int tombstone_warn_threshold = 1000;
+    public volatile int tombstone_failure_threshold = 100000;
+
+    public volatile Long index_summary_capacity_in_mb;
+    public volatile int index_summary_resize_interval_in_minutes = 60;
 
     public static boolean getOutboundBindAny()
     {

@@ -20,6 +20,8 @@ package org.apache.cassandra.cql3.statements;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import org.github.jamm.MemoryMeter;
+
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.IMutation;
@@ -34,7 +36,7 @@ import org.apache.cassandra.utils.Pair;
  * A <code>BATCH</code> statement parsed from a CQL query.
  *
  */
-public class BatchStatement implements CQLStatement
+public class BatchStatement implements CQLStatement, MeasurableForPreparedCache
 {
     public static enum Type
     {
@@ -62,7 +64,15 @@ public class BatchStatement implements CQLStatement
         this.attrs = attrs;
     }
 
-    public int getBoundsTerms()
+    public long measureForPreparedCache(MemoryMeter meter)
+    {
+        long size = meter.measure(this) + meter.measure(statements) + meter.measureDeep(attrs);
+        for (ModificationStatement stmt : statements)
+            size += stmt.measureForPreparedCache(meter);
+        return size;
+    }
+
+    public int getBoundTerms()
     {
         return boundTerms;
     }
@@ -83,6 +93,11 @@ public class BatchStatement implements CQLStatement
             if (attrs.isTimestampSet() && statement.isTimestampSet())
                 throw new InvalidRequestException("Timestamp must be set either on BATCH or individual statements");
         }
+    }
+
+    public List<ModificationStatement> getStatements()
+    {
+        return statements;
     }
 
     private Collection<? extends IMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
@@ -191,7 +206,7 @@ public class BatchStatement implements CQLStatement
 
         public ParsedStatement.Prepared prepare() throws InvalidRequestException
         {
-            ColumnSpecification[] boundNames = new ColumnSpecification[getBoundsTerms()];
+            VariableSpecifications boundNames = getBoundVariables();
 
             List<ModificationStatement> statements = new ArrayList<ModificationStatement>(parsedStatements.size());
             for (ModificationStatement.Parsed parsed : parsedStatements)
@@ -212,7 +227,7 @@ public class BatchStatement implements CQLStatement
             Attributes prepAttrs = attrs.prepare("[batch]", "[batch]");
             prepAttrs.collectMarkerSpecification(boundNames);
 
-            return new ParsedStatement.Prepared(new BatchStatement(getBoundsTerms(), type, statements, prepAttrs), Arrays.<ColumnSpecification>asList(boundNames));
+            return new ParsedStatement.Prepared(new BatchStatement(boundNames.size(), type, statements, prepAttrs), boundNames);
         }
     }
 }

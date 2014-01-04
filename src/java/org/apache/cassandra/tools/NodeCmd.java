@@ -27,10 +27,15 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.Map.Entry;
 import java.util.concurrent.ExecutionException;
+import javax.management.openmbean.TabularData;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Maps;
+import com.yammer.metrics.reporting.JmxReporter;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.metrics.StorageMetrics;
+import org.apache.cassandra.utils.EstimatedHistogram;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.commons.cli.*;
 import org.yaml.snakeyaml.Yaml;
@@ -45,11 +50,9 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.EndpointSnitchInfoMBean;
 import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.service.CacheServiceMBean;
-import org.apache.cassandra.service.StorageProxyMBean;
 import org.apache.cassandra.streaming.StreamState;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.SessionInfo;
-import org.apache.cassandra.utils.EstimatedHistogram;
 import org.apache.cassandra.utils.Pair;
 
 public class NodeCmd
@@ -63,12 +66,15 @@ public class NodeCmd
     private static final Pair<String, String> TAG_OPT = Pair.create("t", "tag");
     private static final Pair<String, String> TOKENS_OPT = Pair.create("T", "tokens");
     private static final Pair<String, String> PRIMARY_RANGE_OPT = Pair.create("pr", "partitioner-range");
-    private static final Pair<String, String> SNAPSHOT_REPAIR_OPT = Pair.create("snapshot", "with-snapshot");
+    private static final Pair<String, String> PARALLEL_REPAIR_OPT = Pair.create("par", "parallel");
     private static final Pair<String, String> LOCAL_DC_REPAIR_OPT = Pair.create("local", "in-local-dc");
+    private static final Pair<String, String> DC_REPAIR_OPT = Pair.create("dc", "in-dc");
     private static final Pair<String, String> START_TOKEN_OPT = Pair.create("st", "start-token");
     private static final Pair<String, String> END_TOKEN_OPT = Pair.create("et", "end-token");
     private static final Pair<String, String> UPGRADE_ALL_SSTABLE_OPT = Pair.create("a", "include-all-sstables");
     private static final Pair<String, String> NO_SNAPSHOT = Pair.create("ns", "no-snapshot");
+    private static final Pair<String, String> CFSTATS_IGNORE_OPT = Pair.create("i", "ignore");
+    private static final Pair<String, String> RESOLVE_IP = Pair.create("r", "resolve-ip");
 
     private static final String DEFAULT_HOST = "127.0.0.1";
     private static final int DEFAULT_PORT = 7199;
@@ -87,12 +93,15 @@ public class NodeCmd
         options.addOption(TAG_OPT,      true, "optional name to give a snapshot");
         options.addOption(TOKENS_OPT,   false, "display all tokens");
         options.addOption(PRIMARY_RANGE_OPT, false, "only repair the first range returned by the partitioner for the node");
-        options.addOption(SNAPSHOT_REPAIR_OPT, false, "repair one node at a time using snapshots");
+        options.addOption(PARALLEL_REPAIR_OPT, false, "repair nodes in parallel.");
         options.addOption(LOCAL_DC_REPAIR_OPT, false, "only repair against nodes in the same datacenter");
+        options.addOption(DC_REPAIR_OPT, true, "only repair against nodes in the specified datacenters (comma separated)");
         options.addOption(START_TOKEN_OPT, true, "token at which repair range starts");
         options.addOption(END_TOKEN_OPT, true, "token at which repair range ends");
         options.addOption(UPGRADE_ALL_SSTABLE_OPT, false, "includes sstables that are already on the most recent version during upgradesstables");
         options.addOption(NO_SNAPSHOT, false, "disables snapshot creation for scrub");
+        options.addOption(CFSTATS_IGNORE_OPT, false, "ignore the supplied list of keyspace.columnfamiles in statistics");
+        options.addOption(RESOLVE_IP, false, "show node domain names instead of IPs");
     }
 
     public NodeCmd(NodeProbe probe)
@@ -108,6 +117,7 @@ public class NodeCmd
         CLEARSNAPSHOT,
         COMPACT,
         COMPACTIONSTATS,
+        COMPACTIONHISTORY,
         DECOMMISSION,
         DESCRIBECLUSTER,
         DISABLEBINARY,
@@ -155,7 +165,9 @@ public class NodeCmd
         STATUSBINARY,
         STATUSTHRIFT,
         STOP,
+        STOPDAEMON,
         TPSTATS,
+        TRUNCATEHINTS,
         UPGRADESSTABLES,
         VERSION,
         DESCRIBERING,
@@ -163,7 +175,9 @@ public class NodeCmd
         REBUILD_INDEX,
         RESETLOCALSCHEMA,
         ENABLEBACKUP,
-        DISABLEBACKUP
+        DISABLEBACKUP,
+        SETCACHEKEYSTOSAVE,
+        RELOADTRIGGERS
     }
 
 
@@ -275,6 +289,12 @@ public class NodeCmd
         {
             throw new RuntimeException(e);
         }
+
+        if(DatabaseDescriptor.getNumTokens() > 1)
+        {
+            outs.println("  Warning: \"nodetool ring\" is used to output all the tokens of a node.");
+            outs.println("  To view status related info of a node use \"nodetool status\" instead.\n");
+        }
     }
 
     private void printDc(PrintStream outs, String format, String dc, LinkedHashMultimap<String, String> endpointsToTokens,
@@ -292,19 +312,14 @@ public class NodeCmd
 
         // get the total amount of replicas for this dc and the last token in this dc's ring
         List<String> tokens = new ArrayList<String>();
-        float totalReplicas = 0f;
         String lastToken = "";
 
         for (Map.Entry<InetAddress, Float> entry : filteredOwnerships.entrySet())
         {
             tokens.addAll(endpointsToTokens.get(entry.getKey().getHostAddress()));
             lastToken = tokens.get(tokens.size() - 1);
-            totalReplicas += entry.getValue();
         }
 
-
-        if (keyspaceSelected)
-            outs.print("Replicas: " + (int) totalReplicas + "\n\n");
 
         outs.printf(format, "Address", "Rack", "Status", "State", "Load", "Owns", "Token");
 
@@ -361,11 +376,13 @@ public class NodeCmd
         Map<String, String> loadMap, hostIDMap, tokensToEndpoints;
         EndpointSnitchInfoMBean epSnitchInfo;
         PrintStream outs;
+        private final boolean resolveIp;
 
-        ClusterStatus(PrintStream outs, String kSpace)
+        ClusterStatus(PrintStream outs, String kSpace, boolean resolveIp)
         {
             this.kSpace = kSpace;
             this.outs = outs;
+            this.resolveIp = resolveIp;
             joiningNodes = probe.getJoiningNodes();
             leavingNodes = probe.getLeavingNodes();
             movingNodes = probe.getMovingNodes();
@@ -383,18 +400,58 @@ public class NodeCmd
             outs.println("|/ State=Normal/Leaving/Joining/Moving");
         }
 
-        private Map<String, Map<InetAddress, Float>> getOwnershipByDc(Map<InetAddress, Float> ownerships)
+        class SetHostStat implements Iterable<HostStat> {
+            final List<HostStat> hostStats = new ArrayList<HostStat>();
+
+            public SetHostStat() {}
+
+            public SetHostStat(Map<InetAddress, Float> ownerships) {
+                for (Map.Entry<InetAddress, Float> entry : ownerships.entrySet()) {
+                    hostStats.add(new HostStat(entry));
+                }
+            }
+
+            @Override
+            public Iterator<HostStat> iterator() {
+                return hostStats.iterator();
+            }
+
+            public void add(HostStat entry) {
+                hostStats.add(entry);
+            }
+        }
+
+        class HostStat {
+            public final String ip;
+            public final String dns;
+            public final Float owns;
+
+            public HostStat(Map.Entry<InetAddress, Float> ownership) {
+                this.ip = ownership.getKey().getHostAddress();
+                this.dns = ownership.getKey().getHostName();
+                this.owns = ownership.getValue();
+            }
+
+            public String ipOrDns() {
+                if (resolveIp) {
+                    return dns;
+                }
+                return ip;
+            }
+        }
+
+        private Map<String, SetHostStat> getOwnershipByDc(SetHostStat ownerships)
         throws UnknownHostException
         {
-            Map<String, Map<InetAddress, Float>> ownershipByDc = Maps.newLinkedHashMap();
+            Map<String, SetHostStat> ownershipByDc = Maps.newLinkedHashMap();
             EndpointSnitchInfoMBean epSnitchInfo = probe.getEndpointSnitchInfoProxy();
 
-            for (Map.Entry<InetAddress, Float> ownership : ownerships.entrySet())
+            for (HostStat ownership : ownerships)
             {
-                String dc = epSnitchInfo.getDatacenter(ownership.getKey().getHostAddress());
+                String dc = epSnitchInfo.getDatacenter(ownership.ip);
                 if (!ownershipByDc.containsKey(dc))
-                    ownershipByDc.put(dc, new LinkedHashMap<InetAddress, Float>());
-                ownershipByDc.get(dc).put(ownership.getKey(), ownership.getValue());
+                    ownershipByDc.put(dc, new SetHostStat());
+                ownershipByDc.get(dc).add(ownership);
             }
 
             return ownershipByDc;
@@ -422,12 +479,12 @@ public class NodeCmd
             return format;
         }
 
-        private void printNode(String endpoint, Float owns, Map<InetAddress, Float> ownerships,
+        private void printNode(HostStat hostStat,
                 boolean hasEffectiveOwns, boolean isTokenPerNode) throws UnknownHostException
         {
             String status, state, load, strOwns, hostID, rack, fmt;
             fmt = getFormat(hasEffectiveOwns, isTokenPerNode);
-
+            String endpoint = hostStat.ip;
             if      (liveNodes.contains(endpoint))        status = "U";
             else if (unreachableNodes.contains(endpoint)) status = "D";
             else                                          status = "?";
@@ -437,18 +494,18 @@ public class NodeCmd
             else                                          state = "N";
 
             load = loadMap.containsKey(endpoint) ? loadMap.get(endpoint) : "?";
-            strOwns = new DecimalFormat("##0.0%").format(ownerships.get(InetAddress.getByName(endpoint)));
+            strOwns = new DecimalFormat("##0.0%").format(hostStat.owns);
             hostID = hostIDMap.get(endpoint);
             rack = epSnitchInfo.getRack(endpoint);
 
             if (isTokenPerNode)
             {
-                outs.printf(fmt, status, state, endpoint, load, strOwns, hostID, probe.getTokens(endpoint).get(0), rack);
+                outs.printf(fmt, status, state, hostStat.ipOrDns(), load, strOwns, hostID, probe.getTokens(endpoint).get(0), rack);
             }
             else
             {
                 int tokens = probe.getTokens(endpoint).size();
-                outs.printf(fmt, status, state, endpoint, load, tokens, strOwns, hostID, rack);
+                outs.printf(fmt, status, state, hostStat.ipOrDns(), load, tokens, strOwns, hostID, rack);
             }
         }
 
@@ -463,42 +520,41 @@ public class NodeCmd
                 outs.printf(fmt, "-", "-", "Address", "Load", "Tokens", owns, "Host ID", "Rack");
         }
 
+        void findMaxAddressLength(Map<String, SetHostStat> dcs) {
+            maxAddressLength = 0;
+            for (Map.Entry<String, SetHostStat> dc : dcs.entrySet())
+            {
+                for (HostStat stat : dc.getValue()) {
+                    maxAddressLength = Math.max(maxAddressLength, stat.ipOrDns().length());
+                }
+            }
+        }
+
         void print() throws UnknownHostException
         {
-            Map<InetAddress, Float> ownerships;
+            SetHostStat ownerships;
             boolean hasEffectiveOwns = false, isTokenPerNode = true;
 
             try
             {
-                ownerships = probe.effectiveOwnership(kSpace);
+                ownerships = new SetHostStat(probe.effectiveOwnership(kSpace));
                 hasEffectiveOwns = true;
             }
             catch (IllegalStateException e)
             {
-                ownerships = probe.getOwnership();
+                ownerships = new SetHostStat(probe.getOwnership());
             }
 
             // More tokens then nodes (aka vnodes)?
             if (new HashSet<String>(tokensToEndpoints.values()).size() < tokensToEndpoints.keySet().size())
                 isTokenPerNode = false;
 
-            maxAddressLength = 0;
-            for (Map.Entry<String, Map<InetAddress, Float>> dc : getOwnershipByDc(ownerships).entrySet())
-            {
-                int dcMaxAddressLength = Collections.max(dc.getValue().keySet(), new Comparator<InetAddress>() {
-                    @Override
-                    public int compare(InetAddress first, InetAddress second)
-                    {
-                        return ((Integer)first.getHostAddress().length()).compareTo((Integer)second.getHostAddress().length());
-                    }
-                }).getHostAddress().length();
+            Map<String, SetHostStat> dcs = getOwnershipByDc(ownerships);
 
-                if(dcMaxAddressLength > maxAddressLength)
-                    maxAddressLength = dcMaxAddressLength;
-            }
+            findMaxAddressLength(dcs);
 
             // Datacenters
-            for (Map.Entry<String, Map<InetAddress, Float>> dc : getOwnershipByDc(ownerships).entrySet())
+            for (Map.Entry<String, SetHostStat> dc : dcs.entrySet())
             {
                 String dcHeader = String.format("Datacenter: %s%n", dc.getKey());
                 outs.printf(dcHeader);
@@ -509,21 +565,17 @@ public class NodeCmd
                 printNodesHeader(hasEffectiveOwns, isTokenPerNode);
 
                 // Nodes
-                for (Map.Entry<InetAddress, Float> entry : dc.getValue().entrySet())
-                    printNode(entry.getKey().getHostAddress(),
-                              entry.getValue(),
-                              ownerships,
-                              hasEffectiveOwns,
-                              isTokenPerNode);
+                for (HostStat entry : dc.getValue())
+                    printNode(entry, hasEffectiveOwns, isTokenPerNode);
             }
         }
     }
 
     /** Writes a keyspaceName of cluster-wide node information to a PrintStream
      * @throws UnknownHostException */
-    public void printClusterStatus(PrintStream outs, String keyspace) throws UnknownHostException
+    public void printClusterStatus(PrintStream outs, String keyspace, boolean resolveIp) throws UnknownHostException
     {
-        new ClusterStatus(outs, keyspace).print();
+        new ClusterStatus(outs, keyspace, resolveIp).print();
     }
 
     public void printThreadPoolStats(PrintStream outs)
@@ -592,28 +644,30 @@ public class NodeCmd
         outs.printf("%-17s: %s%n", "Rack", probe.getRack());
 
         // Exceptions
-        outs.printf("%-17s: %s%n", "Exceptions", probe.getExceptionCount());
+        outs.printf("%-17s: %s%n", "Exceptions", probe.getStorageMetric("Exceptions"));
 
         CacheServiceMBean cacheService = probe.getCacheServiceMBean();
 
         // Key Cache: Hits, Requests, RecentHitRate, SavePeriodInSeconds
-        outs.printf("%-17s: size %d (bytes), capacity %d (bytes), %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
+        outs.printf("%-17s: entries %d, size %d (bytes), capacity %d (bytes), %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
                     "Key Cache",
-                    cacheService.getKeyCacheSize(),
-                    cacheService.getKeyCacheCapacityInBytes(),
-                    cacheService.getKeyCacheHits(),
-                    cacheService.getKeyCacheRequests(),
-                    cacheService.getKeyCacheRecentHitRate(),
+                    probe.getCacheMetric("KeyCache", "Entries"),
+                    probe.getCacheMetric("KeyCache", "Size"),
+                    probe.getCacheMetric("KeyCache", "Capacity"),
+                    probe.getCacheMetric("KeyCache", "Hits"),
+                    probe.getCacheMetric("KeyCache", "Requests"),
+                    probe.getCacheMetric("KeyCache", "HitRate"),
                     cacheService.getKeyCacheSavePeriodInSeconds());
 
         // Row Cache: Hits, Requests, RecentHitRate, SavePeriodInSeconds
-        outs.printf("%-17s: size %d (bytes), capacity %d (bytes), %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
+        outs.printf("%-17s: entries %d, size %d (bytes), capacity %d (bytes), %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
                     "Row Cache",
-                    cacheService.getRowCacheSize(),
-                    cacheService.getRowCacheCapacityInBytes(),
-                    cacheService.getRowCacheHits(),
-                    cacheService.getRowCacheRequests(),
-                    cacheService.getRowCacheRecentHitRate(),
+                    probe.getCacheMetric("RowCache", "Entries"),
+                    probe.getCacheMetric("RowCache", "Size"),
+                    probe.getCacheMetric("RowCache", "Capacity"),
+                    probe.getCacheMetric("RowCache", "Hits"),
+                    probe.getCacheMetric("RowCache", "Requests"),
+                    probe.getCacheMetric("RowCache", "HitRate"),
                     cacheService.getRowCacheSavePeriodInSeconds());
 
         if (toks.size() > 1 && cmd.hasOption(TOKENS_OPT.left))
@@ -691,7 +745,7 @@ public class NodeCmd
     {
         int compactionThroughput = probe.getCompactionThroughput();
         CompactionManagerMBean cm = probe.getCompactionManagerProxy();
-        outs.println("pending tasks: " + cm.getPendingTasks());
+        outs.println("pending tasks: " + probe.getCompactionMetric("PendingTasks"));
         if (cm.getCompactions().size() > 0)
             outs.printf("%25s%16s%16s%16s%16s%10s%10s%n", "compaction type", "keyspace", "table", "completed", "total", "unit", "progress");
         long remainingBytes = 0;
@@ -770,8 +824,9 @@ public class NodeCmd
         }
     }
 
-    public void printColumnFamilyStats(PrintStream outs)
+    public void printColumnFamilyStats(PrintStream outs, boolean ignoreMode, String [] filterList)
     {
+        OptionFilter filter = new OptionFilter(ignoreMode, filterList);
         Map <String, List <ColumnFamilyStoreMBean>> cfstoreMap = new HashMap <String, List <ColumnFamilyStoreMBean>>();
 
         // get a list of column family stores
@@ -783,19 +838,23 @@ public class NodeCmd
             String keyspaceName = entry.getKey();
             ColumnFamilyStoreMBean cfsProxy = entry.getValue();
 
-            if (!cfstoreMap.containsKey(keyspaceName))
+            if (!cfstoreMap.containsKey(keyspaceName) && filter.isColumnFamilyIncluded(entry.getKey(), cfsProxy.getColumnFamilyName()))
             {
                 List<ColumnFamilyStoreMBean> columnFamilies = new ArrayList<ColumnFamilyStoreMBean>();
                 columnFamilies.add(cfsProxy);
                 cfstoreMap.put(keyspaceName, columnFamilies);
             }
-            else
+            else if (filter.isColumnFamilyIncluded(entry.getKey(), cfsProxy.getColumnFamilyName()))
             {
                 cfstoreMap.get(keyspaceName).add(cfsProxy);
             }
         }
 
-        // print out the keyspace statistics
+        // make sure all specified kss and cfs exist
+        filter.verifyKeyspaces(probe.getKeyspaces());
+        filter.verifyColumnFamilies();
+
+        // print out the table statistics
         for (Entry<String, List<ColumnFamilyStoreMBean>> entry : cfstoreMap.entrySet())
         {
             String keyspaceName = entry.getKey();
@@ -809,20 +868,21 @@ public class NodeCmd
             outs.println("Keyspace: " + keyspaceName);
             for (ColumnFamilyStoreMBean cfstore : columnFamilies)
             {
-                long writeCount = cfstore.getWriteCount();
-                long readCount = cfstore.getReadCount();
+                String cfName = cfstore.getColumnFamilyName();
+                long writeCount = ((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "WriteLatency")).getCount();
+                long readCount = ((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "ReadLatency")).getCount();
 
                 if (readCount > 0)
                 {
                     keyspaceReadCount += readCount;
-                    keyspaceTotalReadTime += cfstore.getTotalReadLatencyMicros();
+                    keyspaceTotalReadTime += (long)probe.getColumnFamilyMetric(keyspaceName, cfName, "ReadTotalLatency");
                 }
                 if (writeCount > 0)
                 {
                     keyspaceWriteCount += writeCount;
-                    keyspaceTotalWriteTime += cfstore.getTotalWriteLatencyMicros();
+                    keyspaceTotalWriteTime += (long)probe.getColumnFamilyMetric(keyspaceName, cfName, "WriteTotalLatency");
                 }
-                keyspacePendingTasks += cfstore.getPendingTasks();
+                keyspacePendingTasks += (int)probe.getColumnFamilyMetric(keyspaceName, cfName, "PendingTasks");
             }
 
             double keyspaceReadLatency = keyspaceReadCount > 0 ? keyspaceTotalReadTime / keyspaceReadCount / 1000 : Double.NaN;
@@ -843,7 +903,8 @@ public class NodeCmd
                 else
                     outs.println("\t\tTable: " + cfName);
 
-                outs.println("\t\tSSTable count: " + cfstore.getLiveSSTableCount());
+                outs.println("\t\tSSTable count: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "LiveSSTableCount"));
+
                 int[] leveledSStables = cfstore.getSSTableCountPerLevel();
                 if (leveledSStables != null)
                 {
@@ -865,24 +926,30 @@ public class NodeCmd
                             outs.println("]");
                     }
                 }
-                outs.println("\t\tSpace used (live), bytes: " + cfstore.getLiveDiskSpaceUsed());
-                outs.println("\t\tSpace used (total), bytes: " + cfstore.getTotalDiskSpaceUsed());
-                outs.println("\t\tSSTable Compression Ratio: " + cfstore.getCompressionRatio());
-                outs.println("\t\tNumber of keys (estimate): " + cfstore.estimateKeys());
-                outs.println("\t\tMemtable cell count: " + cfstore.getMemtableColumnsCount());
-                outs.println("\t\tMemtable data size, bytes: " + cfstore.getMemtableDataSize());
-                outs.println("\t\tMemtable switch count: " + cfstore.getMemtableSwitchCount());
-                outs.println("\t\tRead count: " + cfstore.getReadCount());
-                outs.println("\t\tRead latency, micros: " + String.format("%01.3f", cfstore.getRecentReadLatencyMicros() / 1000) + " ms.");
-                outs.println("\t\tWrite count: " + cfstore.getWriteCount());
-                outs.println("\t\tWrite latency, micros: " + String.format("%01.3f", cfstore.getRecentWriteLatencyMicros() / 1000) + " ms.");
-                outs.println("\t\tPending tasks: " + cfstore.getPendingTasks());
-                outs.println("\t\tBloom filter false positives: " + cfstore.getBloomFilterFalsePositives());
-                outs.println("\t\tBloom filter false ratio: " + String.format("%01.5f", cfstore.getRecentBloomFilterFalseRatio()));
-                outs.println("\t\tBloom filter space used, bytes: " + cfstore.getBloomFilterDiskSpaceUsed());
-                outs.println("\t\tCompacted partition minimum size, bytes: " + cfstore.getMinRowSize());
-                outs.println("\t\tCompacted partition maximum size, bytes: " + cfstore.getMaxRowSize());
-                outs.println("\t\tCompacted partition mean size, bytes: " + cfstore.getMeanRowSize());
+                outs.println("\t\tSpace used (live), bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "LiveDiskSpaceUsed"));
+                outs.println("\t\tSpace used (total), bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "TotalDiskSpaceUsed"));
+                outs.println("\t\tSpace used by snapshots (total), bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "SnapshotsSize"));
+                outs.println("\t\tSSTable Compression Ratio: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "CompressionRatio"));
+                outs.println("\t\tMemtable cell count: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableColumnsCount"));
+                outs.println("\t\tMemtable data size, bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableDataSize"));
+                outs.println("\t\tMemtable switch count: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableSwitchCount"));
+                outs.println("\t\tLocal read count: " + ((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "ReadLatency")).getCount());
+                double localReadLatency = ((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "ReadLatency")).getMean() / 1000;
+                double localRLatency = localReadLatency > 0 ? localReadLatency : Double.NaN;
+                outs.printf("\t\tLocal read latency: %01.3f ms%n", localRLatency);
+                outs.println("\t\tLocal write count: " + ((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "WriteLatency")).getCount());
+                double localWriteLatency = ((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "WriteLatency")).getMean() / 1000;
+                double localWLatency = localWriteLatency > 0 ? localWriteLatency : Double.NaN;
+                outs.printf("\t\tLocal write latency: %01.3f ms%n", localWLatency);
+                outs.println("\t\tPending tasks: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "PendingTasks"));
+                outs.println("\t\tBloom filter false positives: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "BloomFilterFalsePositives"));
+                outs.println("\t\tBloom filter false ratio: " + String.format("%01.5f", probe.getColumnFamilyMetric(keyspaceName, cfName, "RecentBloomFilterFalseRatio")));
+                outs.println("\t\tBloom filter space used, bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "BloomFilterDiskSpaceUsed"));
+                outs.println("\t\tCompacted partition minimum bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MinRowSize"));
+                outs.println("\t\tCompacted partition maximum bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MaxRowSize"));
+                outs.println("\t\tCompacted partition mean bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MeanRowSize"));
+                outs.println("\t\tAverage live cells per slice (last five minutes): " + ((JmxReporter.HistogramMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "LiveScannedHistogram")).getMean());
+                outs.println("\t\tAverage tombstones per slice (last five minutes): " + ((JmxReporter.HistogramMBean)probe.getColumnFamilyMetric(keyspaceName, cfName, "TombstoneScannedHistogram")).getMean());
 
                 outs.println("");
             }
@@ -897,55 +964,76 @@ public class NodeCmd
 
     private void printCfHistograms(String keySpace, String columnFamily, PrintStream output)
     {
-        ColumnFamilyStoreMBean store = this.probe.getCfsProxy(keySpace, columnFamily);
+        // calculate percentile of row size and column count
+        long[] estimatedRowSize = (long[]) probe.getColumnFamilyMetric(keySpace, columnFamily, "EstimatedRowSizeHistogram");
+        long[] estimatedColumnCount = (long[]) probe.getColumnFamilyMetric(keySpace, columnFamily, "EstimatedColumnCountHistogram");
 
-        // default is 90 offsets
-        long[] offsets = new EstimatedHistogram().getBucketOffsets();
+        long[] bucketOffsets = new EstimatedHistogram().getBucketOffsets();
+        EstimatedHistogram rowSizeHist = new EstimatedHistogram(bucketOffsets, estimatedRowSize);
+        EstimatedHistogram columnCountHist = new EstimatedHistogram(bucketOffsets, estimatedColumnCount);
 
-        long[] rrlh = store.getRecentReadLatencyHistogramMicros();
-        long[] rwlh = store.getRecentWriteLatencyHistogramMicros();
-        long[] sprh = store.getRecentSSTablesPerReadHistogram();
-        long[] ersh = store.getEstimatedRowSizeHistogram();
-        long[] ecch = store.getEstimatedColumnCountHistogram();
+        // build arrays to store percentile values
+        double[] estimatedRowSizePercentiles = new double[7];
+        double[] estimatedColumnCountPercentiles = new double[7];
+        double[] offsetPercentiles = new double[]{0.5, 0.75, 0.95, 0.98, 0.99};
+        for (int i = 0; i < offsetPercentiles.length; i++)
+        {
+            estimatedRowSizePercentiles[i] = rowSizeHist.percentile(offsetPercentiles[i]);
+            estimatedColumnCountPercentiles[i] = columnCountHist.percentile(offsetPercentiles[i]);
+        }
+
+        // min value
+        estimatedRowSizePercentiles[5] = rowSizeHist.min();
+        estimatedColumnCountPercentiles[5] = columnCountHist.min();
+        // max value
+        estimatedRowSizePercentiles[6] = rowSizeHist.max();
+        estimatedColumnCountPercentiles[6] = columnCountHist.max();
+
+        String[] percentiles = new String[]{ "50%", "75%", "95%", "98%", "99%", "Min", "Max" };
+        double[] readLatency = probe.metricPercentilesAsArray((JmxReporter.HistogramMBean)probe.getColumnFamilyMetric(keySpace, columnFamily, "ReadLatency"));
+        double[] writeLatency = probe.metricPercentilesAsArray((JmxReporter.TimerMBean)probe.getColumnFamilyMetric(keySpace, columnFamily, "WriteLatency"));
+        double[] sstablesPerRead = probe.metricPercentilesAsArray((JmxReporter.HistogramMBean)probe.getColumnFamilyMetric(keySpace, columnFamily, "SSTablesPerReadHistogram"));
 
         output.println(String.format("%s/%s histograms", keySpace, columnFamily));
-
         output.println(String.format("%-10s%10s%18s%18s%18s%18s",
-                                     "Offset", "SSTables", "Write Latency", "Read Latency", "Partition Size", "Cell Count"));
+                                     "Percentile", "SSTables", "Write Latency", "Read Latency", "Partition Size", "Cell Count"));
         output.println(String.format("%-10s%10s%18s%18s%18s%18s",
                                      "", "", "(micros)", "(micros)", "(bytes)", ""));
 
-        for (int i = 0; i < offsets.length; i++)
+        for (int i = 0; i < percentiles.length; i++)
         {
-            output.println(String.format("%-10d%10s%18s%18s%18s%18s",
-                                         offsets[i],
-                                         (i < sprh.length ? sprh[i] : "0"),
-                                         (i < rwlh.length ? rwlh[i] : "0"),
-                                         (i < rrlh.length ? rrlh[i] : "0"),
-                                         (i < ersh.length ? ersh[i] : "0"),
-                                         (i < ecch.length ? ecch[i] : "0")));
+            output.println(String.format("%-10s%10.2f%18.2f%18.2f%18.0f%18.0f",
+                                         percentiles[i],
+                                         sstablesPerRead[i],
+                                         writeLatency[i],
+                                         readLatency[i],
+                                         estimatedRowSizePercentiles[i],
+                                         estimatedColumnCountPercentiles[i]));
         }
+        output.println();
     }
 
     private void printProxyHistograms(PrintStream output)
     {
-        StorageProxyMBean sp = this.probe.getSpProxy();
-        long[] offsets = new EstimatedHistogram().getBucketOffsets();
-        long[] rrlh = sp.getRecentReadLatencyHistogramMicros();
-        long[] rwlh = sp.getRecentWriteLatencyHistogramMicros();
-        long[] rrnglh = sp.getRecentRangeLatencyHistogramMicros();
+        String[] percentiles = new String[]{ "50%", "75%", "95%", "98%", "99%", "Min", "Max" };
+        double[] readLatency = probe.metricPercentilesAsArray(probe.getProxyMetric("Read"));
+        double[] writeLatency = probe.metricPercentilesAsArray(probe.getProxyMetric("Write"));
+        double[] rangeLatency = probe.metricPercentilesAsArray(probe.getProxyMetric("RangeSlice"));
 
         output.println("proxy histograms");
         output.println(String.format("%-10s%18s%18s%18s",
-                                    "Offset", "Read Latency", "Write Latency", "Range Latency"));
-        for (int i = 0; i < offsets.length; i++)
+                                     "Percentile", "Read Latency", "Write Latency", "Range Latency"));
+        output.println(String.format("%-10s%18s%18s%18s",
+                                     "", "(micros)", "(micros)", "(micros)"));
+        for (int i = 0; i < percentiles.length; i++)
         {
-            output.println(String.format("%-10d%18s%18s%18s",
-                                        offsets[i],
-                                        (i < rrlh.length ? rrlh[i] : "0"),
-                                        (i < rwlh.length ? rwlh[i] : "0"),
-                                        (i < rrnglh.length ? rrnglh[i] : "0")));
+            output.println(String.format("%-10s%18.2f%18.2f%18.2f",
+                                         percentiles[i],
+                                         readLatency[i],
+                                         writeLatency[i],
+                                         rangeLatency[i]));
         }
+        output.println();
     }
 
     private void printEndPoints(String keySpace, String cf, String key, PrintStream output)
@@ -1073,10 +1161,15 @@ public class NodeCmd
                     break;
 
                 case INFO            : nodeCmd.printInfo(System.out, cmd); break;
-                case CFSTATS         : nodeCmd.printColumnFamilyStats(System.out); break;
+                case CFSTATS         :
+                    boolean ignoreMode = cmd.hasOption(CFSTATS_IGNORE_OPT.left);
+                    if (arguments.length > 0) { nodeCmd.printColumnFamilyStats(System.out, ignoreMode, arguments); }
+                    else                      { nodeCmd.printColumnFamilyStats(System.out, false, null); }
+                    break;
                 case TPSTATS         : nodeCmd.printThreadPoolStats(System.out); break;
                 case VERSION         : nodeCmd.printReleaseVersion(System.out); break;
                 case COMPACTIONSTATS : nodeCmd.printCompactionStats(System.out); break;
+                case COMPACTIONHISTORY:nodeCmd.printCompactionHistory(System.out); break;
                 case DESCRIBECLUSTER : nodeCmd.printClusterDescription(System.out, host); break;
                 case DISABLEBINARY   : probe.stopNativeTransport(); break;
                 case ENABLEBINARY    : probe.startNativeTransport(); break;
@@ -1093,11 +1186,17 @@ public class NodeCmd
                 case RESETLOCALSCHEMA: probe.resetLocalSchema(); break;
                 case ENABLEBACKUP    : probe.setIncrementalBackupsEnabled(true); break;
                 case DISABLEBACKUP   : probe.setIncrementalBackupsEnabled(false); break;
-                    
+
+                case TRUNCATEHINTS:
+                    if (arguments.length > 1) badUse("Too many arguments.");
+                    else if (arguments.length == 1) probe.truncateHints(arguments[0]);
+                    else probe.truncateHints();
+                    break;
 
                 case STATUS :
-                    if (arguments.length > 0) nodeCmd.printClusterStatus(System.out, arguments[0]);
-                    else                      nodeCmd.printClusterStatus(System.out, null);
+                    boolean resolveIp = cmd.hasOption(RESOLVE_IP.left);
+                    if (arguments.length > 0) nodeCmd.printClusterStatus(System.out, arguments[0], resolveIp);
+                    else                      nodeCmd.printClusterStatus(System.out, null, resolveIp);
                     break;
 
                 case DECOMMISSION :
@@ -1216,6 +1315,11 @@ public class NodeCmd
                     probe.setCacheCapacities(Integer.parseInt(arguments[0]), Integer.parseInt(arguments[1]));
                     break;
 
+                case SETCACHEKEYSTOSAVE :
+                    if (arguments.length != 2) { badUse("setcachekeystosave requires key-cache-keys-to-save, and row-cache-keys-to-save args."); }
+                    probe.setCacheKeysToSave(Integer.parseInt(arguments[0]), Integer.parseInt(arguments[1]));
+                    break;
+
                 case SETCOMPACTIONTHRESHOLD :
                     if (arguments.length != 4) { badUse("setcompactionthreshold requires ks, cf, min, and max threshold args."); }
                     int minthreshold = Integer.parseInt(arguments[2]);
@@ -1261,6 +1365,12 @@ public class NodeCmd
                     probe.stop(arguments[0].toUpperCase());
                     break;
 
+                case STOPDAEMON:
+                    if (arguments.length != 0) { badUse("stopdaemon does not take arguments."); }
+                    try { probe.stopCassandraDaemon(); }
+                    catch (Throwable t) { System.out.println("Cassandra has shut down.\n"); }
+                    break;
+
                 case DESCRIBERING :
                     if (arguments.length != 1) { badUse("Missing keyspace argument for describering."); }
                     nodeCmd.printDescribeRing(arguments[0], System.out);
@@ -1268,6 +1378,10 @@ public class NodeCmd
 
                 case RANGEKEYSAMPLE :
                     nodeCmd.printRangeKeySample(System.out);
+                    break;
+
+                case RELOADTRIGGERS :
+                    probe.reloadTriggers();
                     break;
 
                 default :
@@ -1289,6 +1403,29 @@ public class NodeCmd
             }
         }
         System.exit(probe.isFailed() ? 1 : 0);
+    }
+
+    private void printCompactionHistory(PrintStream out)
+    {
+        out.println("Compaction History: ");
+
+        TabularData tabularData = this.probe.getCompactionHistory();
+        if (tabularData.isEmpty())
+        {
+            out.printf("There is no compaction history");
+            return;
+        }
+
+        String format = "%-41s%-19s%-29s%-26s%-15s%-15s%s%n";
+        List<String> indexNames = tabularData.getTabularType().getIndexNames();
+        out.printf(format, (Object[]) indexNames.toArray(new String[indexNames.size()]));
+
+        Set<?> values = tabularData.keySet();
+        for (Object eachValue : values)
+        {
+            List<?> value = (List<?>) eachValue;
+            out.printf(format, value.toArray(new Object[value.size()]));
+        }
     }
 
     private static void printHistory(String[] args, ToolCommandLine cmd)
@@ -1426,13 +1563,19 @@ public class NodeCmd
             switch (nc)
             {
                 case REPAIR  :
-                    boolean snapshot = cmd.hasOption(SNAPSHOT_REPAIR_OPT.left);
+                    boolean sequential = !cmd.hasOption(PARALLEL_REPAIR_OPT.left);
                     boolean localDC = cmd.hasOption(LOCAL_DC_REPAIR_OPT.left);
+                    boolean specificDC = cmd.hasOption(DC_REPAIR_OPT.left);
                     boolean primaryRange = cmd.hasOption(PRIMARY_RANGE_OPT.left);
+                    Collection<String> dataCenters = null;
+                    if (specificDC)
+                        dataCenters = Arrays.asList(cmd.getOptionValue(DC_REPAIR_OPT.left).split(","));
+                    else if (localDC)
+                        dataCenters = Arrays.asList(probe.getDataCenter());
                     if (cmd.hasOption(START_TOKEN_OPT.left) || cmd.hasOption(END_TOKEN_OPT.left))
-                        probe.forceRepairRangeAsync(System.out, keyspace, snapshot, localDC, cmd.getOptionValue(START_TOKEN_OPT.left), cmd.getOptionValue(END_TOKEN_OPT.left), columnFamilies);
+                        probe.forceRepairRangeAsync(System.out, keyspace, sequential, dataCenters, cmd.getOptionValue(START_TOKEN_OPT.left), cmd.getOptionValue(END_TOKEN_OPT.left), columnFamilies);
                     else
-                        probe.forceRepairAsync(System.out, keyspace, snapshot, localDC, primaryRange, columnFamilies);
+                        probe.forceRepairAsync(System.out, keyspace, sequential, dataCenters, primaryRange, columnFamilies);
                     break;
                 case FLUSH   :
                     try { probe.forceKeyspaceFlush(keyspace, columnFamilies); }
@@ -1469,6 +1612,86 @@ public class NodeCmd
         }
     }
 
+    /**
+     * Used for filtering keyspaces and columnfamilies to be displayed using the cfstats command.
+     */
+    private static class OptionFilter
+    {
+        private Map<String, List<String>> filter = new HashMap<String, List<String>>();
+        private Map<String, List<String>> verifier = new HashMap<String, List<String>>();
+        private String [] filterList;
+        private boolean ignoreMode;
+
+        public OptionFilter(boolean ignoreMode, String... filterList)
+        {
+            this.filterList = filterList;
+            this.ignoreMode = ignoreMode;
+
+            if(filterList == null)
+                return;
+
+            for(String s : filterList)
+            {
+                String [] keyValues = s.split("\\.", 2);
+
+                // build the map that stores the ks' and cfs to use
+                if(!filter.containsKey(keyValues[0]))
+                {
+                    filter.put(keyValues[0], new ArrayList<String>());
+                    verifier.put(keyValues[0], new ArrayList<String>());
+
+                    if(keyValues.length == 2)
+                    {
+                        filter.get(keyValues[0]).add(keyValues[1]);
+                        verifier.get(keyValues[0]).add(keyValues[1]);
+                    }
+                }
+                else
+                {
+                    if(keyValues.length == 2)
+                    {
+                        filter.get(keyValues[0]).add(keyValues[1]);
+                        verifier.get(keyValues[0]).add(keyValues[1]);
+                    }
+                }
+            }
+        }
+
+        public boolean isColumnFamilyIncluded(String keyspace, String columnFamily)
+        {
+            // supplying empty params list is treated as wanting to display all kss & cfs
+            if(filterList == null)
+                return !ignoreMode;
+
+            List<String> cfs = filter.get(keyspace);
+
+            // no such keyspace is in the map
+            if (cfs == null)
+                return ignoreMode;
+                // only a keyspace with no cfs was supplied
+                // so ignore or include (based on the flag) every column family in specified keyspace
+            else if (cfs.size() == 0)
+                return !ignoreMode;
+
+            // keyspace exists, and it contains specific cfs
+            verifier.get(keyspace).remove(columnFamily);
+            return ignoreMode ^ cfs.contains(columnFamily);
+        }
+
+        public void verifyKeyspaces(List<String> keyspaces)
+        {
+            for(String ks : verifier.keySet())
+                if(!keyspaces.contains(ks))
+                    throw new RuntimeException("Unknown keyspace: " + ks);
+        }
+
+        public void verifyColumnFamilies()
+        {
+            for(String ks : filter.keySet())
+                if(verifier.get(ks).size() > 0)
+                    throw new RuntimeException("Unknown column families: " + verifier.get(ks).toString() + " in keyspace: " + ks);
+        }
+    }
 
     private static class ToolOptions extends Options
     {

@@ -22,7 +22,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.MappedByteBuffer;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.text.DecimalFormat;
 import java.util.Arrays;
 
@@ -74,9 +76,7 @@ public class FileUtils
 
         try
         {
-            // Avoiding getAbsolutePath() in case there is ever a difference between that and the the
-            // behavior of nio2.
-            Files.createLink(Paths.get(to.getPath()), Paths.get(from.getPath()));
+            Files.createLink(to.toPath(), from.toPath());
         }
         catch (IOException e)
         {
@@ -110,14 +110,28 @@ public class FileUtils
     {
         assert file.exists() : "attempted to delete non-existing file " + file.getName();
         if (logger.isDebugEnabled())
-            logger.debug("Deleting " + file.getName());
-        if (!file.delete())
-            throw new FSWriteError(new IOException("Failed to delete " + file.getAbsolutePath()), file);
+            logger.debug("Deleting {}", file.getName());
+        try
+        {
+            Files.delete(file.toPath());
+        }
+        catch (IOException e)
+        {
+            throw new FSWriteError(e, file);
+        }
     }
 
     public static void renameWithOutConfirm(String from, String to)
     {
-        new File(from).renameTo(new File(to));
+        try
+        {
+            atomicMoveWithFallback(new File(from).toPath(), new File(to).toPath());
+        }
+        catch (IOException e)
+        {
+            if (logger.isTraceEnabled())
+                logger.trace("Could not move file "+from+" to "+to, e);
+        }
     }
 
     public static void renameWithConfirm(String from, String to)
@@ -132,10 +146,35 @@ public class FileUtils
             logger.debug((String.format("Renaming %s to %s", from.getPath(), to.getPath())));
         // this is not FSWE because usually when we see it it's because we didn't close the file before renaming it,
         // and Windows is picky about that.
-        if (!from.renameTo(to))
-            throw new RuntimeException(String.format("Failed to rename %s to %s", from.getPath(), to.getPath()));
+        try
+        {
+            atomicMoveWithFallback(from.toPath(), to.toPath());
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(String.format("Failed to rename %s to %s", from.getPath(), to.getPath()), e);
+        }
     }
 
+    /**
+     * Move a file atomically, if it fails, it falls back to a non-atomic operation
+     * @param from
+     * @param to
+     * @throws IOException
+     */
+    private static void atomicMoveWithFallback(Path from, Path to) throws IOException
+    {
+        try
+        {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        }
+        catch (AtomicMoveNotSupportedException e)
+        {
+            logger.debug("Could not do an atomic move", e);
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+        }
+
+    }
     public static void truncate(String path, long size)
     {
         RandomAccessFile file;
@@ -172,7 +211,7 @@ public class FileUtils
         }
         catch (Exception e)
         {
-            logger.warn("Failed closing " + c, e);
+            logger.warn("Failed closing {}", c, e);
         }
     }
 
@@ -194,7 +233,7 @@ public class FileUtils
             catch (IOException ex)
             {
                 e = ex;
-                logger.warn("Failed closing stream " + c, ex);
+                logger.warn("Failed closing stream {}", c, ex);
             }
         }
         if (e != null)

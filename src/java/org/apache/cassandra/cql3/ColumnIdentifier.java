@@ -20,43 +20,51 @@ package org.apache.cassandra.cql3;
 import java.util.Locale;
 import java.nio.ByteBuffer;
 
+import org.apache.cassandra.cache.IMeasurableMemory;
 import org.apache.cassandra.cql3.statements.Selectable;
+import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.ObjectSizes;
 
 /**
  * Represents an identifer for a CQL column definition.
  */
-public class ColumnIdentifier implements Selectable, Comparable<ColumnIdentifier>
+public class ColumnIdentifier implements Selectable, Comparable<ColumnIdentifier>, IMeasurableMemory
 {
-    public final ByteBuffer key;
+    public final ByteBuffer bytes;
     private final String text;
 
     public ColumnIdentifier(String rawText, boolean keepCase)
     {
         this.text = keepCase ? rawText : rawText.toLowerCase(Locale.US);
-        this.key = ByteBufferUtil.bytes(this.text);
+        this.bytes = ByteBufferUtil.bytes(this.text);
     }
 
-    public ColumnIdentifier(ByteBuffer key, AbstractType type)
+    public ColumnIdentifier(ByteBuffer bytes, AbstractType type)
     {
-        this.key = key;
-        this.text = type.getString(key);
+        this.bytes = bytes;
+        this.text = type.getString(bytes);
     }
 
     @Override
     public final int hashCode()
     {
-        return key.hashCode();
+        return bytes.hashCode();
     }
 
     @Override
     public final boolean equals(Object o)
     {
+        // Note: it's worth checking for reference equality since we intern those
+        // in SparseCellNameType
+        if (this == o)
+            return true;
+
         if(!(o instanceof ColumnIdentifier))
             return false;
         ColumnIdentifier that = (ColumnIdentifier)o;
-        return key.equals(that.key);
+        return bytes.equals(that.bytes);
     }
 
     @Override
@@ -65,8 +73,18 @@ public class ColumnIdentifier implements Selectable, Comparable<ColumnIdentifier
         return text;
     }
 
+    public long memorySize()
+    {
+        return ObjectSizes.getFieldSize(2 * ObjectSizes.getReferenceSize())
+             + ObjectSizes.getSize(bytes)
+             + TypeSizes.NATIVE.sizeof(text);
+    }
+
     public int compareTo(ColumnIdentifier other)
     {
-        return key.compareTo(other.key);
+        if (this == other)
+            return 0;
+
+        return bytes.compareTo(other.bytes);
     }
 }

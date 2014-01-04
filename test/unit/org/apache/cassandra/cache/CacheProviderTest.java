@@ -51,7 +51,7 @@ public class CacheProviderTest extends SchemaLoader
     private void simpleCase(ColumnFamily cf, ICache<MeasureableString, IRowCacheEntry> cache)
     {
         cache.put(key1, cf);
-        assert cache.get(key1) != null;
+        assertNotNull(cache.get(key1));
 
         assertDigests(cache.get(key1), cf);
         cache.put(key2, cf);
@@ -65,8 +65,8 @@ public class CacheProviderTest extends SchemaLoader
     private void assertDigests(IRowCacheEntry one, ColumnFamily two)
     {
         // CF does not implement .equals
-        assert one instanceof ColumnFamily;
-        assert ColumnFamily.digest((ColumnFamily)one).equals(ColumnFamily.digest(two));
+        assertTrue(one instanceof ColumnFamily);
+        assertEquals(ColumnFamily.digest((ColumnFamily)one), ColumnFamily.digest(two));
     }
 
     // TODO this isn't terribly useful
@@ -104,15 +104,6 @@ public class CacheProviderTest extends SchemaLoader
         cf.addColumn(column("vijay", "great", 1));
         cf.addColumn(column("awesome", "vijay", 1));
         return cf;
-    }
-
-    @Test
-    public void testHeapCache() throws InterruptedException
-    {
-        ICache<MeasureableString, IRowCacheEntry> cache = ConcurrentLinkedHashCache.create(CAPACITY, Weighers.<MeasureableString, IRowCacheEntry>entrySingleton());
-        ColumnFamily cf = createCF();
-        simpleCase(cf, cache);
-        concurrentCase(cf, cache);
     }
 
     @Test

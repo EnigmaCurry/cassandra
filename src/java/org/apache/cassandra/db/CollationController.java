@@ -17,17 +17,16 @@
  */
 package org.apache.cassandra.db;
 
-import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy;
+import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.filter.NamesQueryFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.CounterColumnType;
-import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.tracing.Tracing;
@@ -85,11 +84,7 @@ public class CollationController
                     iterators.add(iter);
                     temp.delete(iter.getColumnFamily());
                     while (iter.hasNext())
-                    {
-                        OnDiskAtom atom = iter.next();
-                        if (atom.getLocalDeletionTime() >= gcBefore)
-                            temp.addAtom(atom);
-                    }
+                        temp.addAtom(iter.next());
                 }
 
                 container.addAll(temp, HeapAllocator.instance);
@@ -99,11 +94,11 @@ public class CollationController
             // avoid changing the filter columns of the original filter
             // (reduceNameFilter removes columns that are known to be irrelevant)
             NamesQueryFilter namesFilter = (NamesQueryFilter) filter.filter;
-            TreeSet<ByteBuffer> filterColumns = new TreeSet<ByteBuffer>(namesFilter.columns);
+            TreeSet<CellName> filterColumns = new TreeSet<>(namesFilter.columns);
             QueryFilter reducedFilter = new QueryFilter(filter.key, filter.cfName, namesFilter.withUpdatedColumns(filterColumns), filter.timestamp);
 
             /* add the SSTables on disk */
-            Collections.sort(view.sstables, SSTable.maxTimestampComparator);
+            Collections.sort(view.sstables, SSTableReader.maxTimestampComparator);
 
             // read sorted sstables
             long mostRecentRowTombstone = Long.MIN_VALUE;
@@ -131,11 +126,7 @@ public class CollationController
                     temp.delete(cf);
                     sstablesIterated++;
                     while (iter.hasNext())
-                    {
-                        OnDiskAtom atom = iter.next();
-                        if (atom.getLocalDeletionTime() >= gcBefore)
-                            temp.addAtom(atom);
-                    }
+                        temp.addAtom(iter.next());
                 }
 
                 container.addAll(temp, HeapAllocator.instance);
@@ -147,22 +138,10 @@ public class CollationController
             if (iterators.isEmpty())
                 return null;
 
-            // We may have added columns that are shadowed by range or row tombstones, since we don't know what
-            // tombstones we may encounter in older sstables (and we don't know how many older sstables we'll have
-            // to open, without processing newer ones first).  So, make one more pass if necessary to clean those out.
-            ColumnFamily returnCF;
-            if (container.isMarkedForDelete())
-            {
-                returnCF = container.cloneMeShallow();
-                Tracing.trace("Removing shadowed cells");
-                filter.collateOnDiskAtom(returnCF, container.iterator(), gcBefore);
-            }
-            else
-            {
-                // skipping the collate is safe because we only do this time-ordered path for NameQueryFilter;
-                // for SQF, the collate is also what limits us to the requested number of columns.
-                returnCF = container;
-            }
+            // do a final collate.  toCollate is boilerplate required to provide a CloseableIterator
+            ColumnFamily returnCF = container.cloneMeShallow();
+            Tracing.trace("Collating all results");
+            filter.collateOnDiskAtom(returnCF, container.iterator(), gcBefore);
 
             // "hoist up" the requested data into a more recent sstable
             if (sstablesIterated > cfs.getMinimumCompactionThreshold()
@@ -170,9 +149,9 @@ public class CollationController
                 && cfs.getCompactionStrategy() instanceof SizeTieredCompactionStrategy)
             {
                 Tracing.trace("Defragmenting requested data");
-                RowMutation rm = new RowMutation(cfs.keyspace.getName(), filter.key.key, returnCF.cloneMe());
+                Mutation mutation = new Mutation(cfs.keyspace.getName(), filter.key.key, returnCF.cloneMe());
                 // skipping commitlog and index updates is fine since we're just de-fragmenting existing data
-                Keyspace.open(rm.getKeyspaceName()).apply(rm, false, false);
+                Keyspace.open(mutation.getKeyspaceName()).apply(mutation, false, false);
             }
 
             // Caller is responsible for final removeDeletedCF.  This is important for cacheRow to work correctly:
@@ -194,11 +173,11 @@ public class CollationController
         if (container == null)
             return;
 
-        for (Iterator<ByteBuffer> iterator = ((NamesQueryFilter) filter.filter).columns.iterator(); iterator.hasNext(); )
+        for (Iterator<CellName> iterator = ((NamesQueryFilter) filter.filter).columns.iterator(); iterator.hasNext(); )
         {
-            ByteBuffer filterColumn = iterator.next();
-            Column column = container.getColumn(filterColumn);
-            if (column != null && column.timestamp() > sstableTimestamp)
+            CellName filterColumn = iterator.next();
+            Cell cell = container.getColumn(filterColumn);
+            if (cell != null && cell.timestamp() > sstableTimestamp)
                 iterator.remove();
         }
     }
@@ -239,7 +218,7 @@ public class CollationController
              * In othere words, iterating in maxTimestamp order allow to do our mostRecentTombstone elimination
              * in one pass, and minimize the number of sstables for which we read a rowTombstone.
              */
-            Collections.sort(view.sstables, SSTable.maxTimestampComparator);
+            Collections.sort(view.sstables, SSTableReader.maxTimestampComparator);
             List<SSTableReader> skippedSSTables = null;
             long mostRecentRowTombstone = Long.MIN_VALUE;
             long minTimestamp = Long.MAX_VALUE;
@@ -266,6 +245,7 @@ public class CollationController
                     continue;
                 }
 
+                sstable.incrementReadCount();
                 OnDiskAtomIterator iter = filter.getSSTableColumnIterator(sstable);
                 iterators.add(iter);
                 if (iter.getColumnFamily() != null)
@@ -288,18 +268,20 @@ public class CollationController
                     if (sstable.getMaxTimestamp() <= minTimestamp)
                         continue;
 
+                    sstable.incrementReadCount();
                     OnDiskAtomIterator iter = filter.getSSTableColumnIterator(sstable);
-                    if (iter.getColumnFamily() == null)
-                        continue;
-
                     ColumnFamily cf = iter.getColumnFamily();
                     // we are only interested in row-level tombstones here, and only if markedForDeleteAt is larger than minTimestamp
-                    if (cf.deletionInfo().getTopLevelDeletion().markedForDeleteAt > minTimestamp)
+                    if (cf != null && cf.deletionInfo().getTopLevelDeletion().markedForDeleteAt > minTimestamp)
                     {
                         includedDueToTombstones++;
                         iterators.add(iter);
                         returnCF.delete(cf.deletionInfo().getTopLevelDeletion());
                         sstablesIterated++;
+                    }
+                    else
+                    {
+                        FileUtils.closeQuietly(iter);
                     }
                 }
             }

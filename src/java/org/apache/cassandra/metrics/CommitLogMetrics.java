@@ -19,18 +19,16 @@ package org.apache.cassandra.metrics;
 
 import com.yammer.metrics.Metrics;
 import com.yammer.metrics.core.Gauge;
-import com.yammer.metrics.core.MetricName;
 
-import org.apache.cassandra.db.commitlog.CommitLogAllocator;
-import org.apache.cassandra.db.commitlog.ICommitLogExecutorService;
+import org.apache.cassandra.db.commitlog.AbstractCommitLogService;
+import org.apache.cassandra.db.commitlog.CommitLogSegmentManager;
 
 /**
  * Metrics for commit log
  */
 public class CommitLogMetrics
 {
-    public static final String GROUP_NAME = "org.apache.cassandra.metrics";
-    public static final String TYPE_NAME = "CommitLog";
+    public static final MetricNameFactory factory = new DefaultNameFactory("CommitLog");
 
     /** Number of completed tasks */
     public final Gauge<Long> completedTasks;
@@ -39,23 +37,23 @@ public class CommitLogMetrics
     /** Current size used by all the commit log segments */
     public final Gauge<Long> totalCommitLogSize;
 
-    public CommitLogMetrics(final ICommitLogExecutorService executor, final CommitLogAllocator allocator)
+    public CommitLogMetrics(final AbstractCommitLogService service, final CommitLogSegmentManager allocator)
     {
-        completedTasks = Metrics.newGauge(new MetricName(GROUP_NAME, TYPE_NAME, "CompletedTasks"), new Gauge<Long>()
+        completedTasks = Metrics.newGauge(factory.createMetricName("CompletedTasks"), new Gauge<Long>()
         {
             public Long value()
             {
-                return executor.getCompletedTasks();
+                return service.getCompletedTasks();
             }
         });
-        pendingTasks = Metrics.newGauge(new MetricName(GROUP_NAME, TYPE_NAME, "PendingTasks"), new Gauge<Long>()
+        pendingTasks = Metrics.newGauge(factory.createMetricName("PendingTasks"), new Gauge<Long>()
         {
             public Long value()
             {
-                return executor.getPendingTasks();
+                return service.getPendingTasks();
             }
         });
-        totalCommitLogSize = Metrics.newGauge(new MetricName(GROUP_NAME, TYPE_NAME, "TotalCommitLogSize"), new Gauge<Long>()
+        totalCommitLogSize = Metrics.newGauge(factory.createMetricName("TotalCommitLogSize"), new Gauge<Long>()
         {
             public Long value()
             {

@@ -220,6 +220,7 @@ Table of Contents
                      0x0007    EACH_QUORUM
                      0x0008    SERIAL
                      0x0009    LOCAL_SERIAL
+                     0x000A    LOCAL_ONE
 
     [string map]      A [short] n, followed by n pair <k><v> where <k> and <v>
                       are [string].
@@ -298,16 +299,16 @@ Table of Contents
         0x02: Skip_metadata. If present, the Result Set returned as a response
               to that query (if any) will have the NO_METADATA flag (see
               Section 4.2.5.2).
-        0x03: Page_size. In that case, <result_page_size> is an [int]
+        0x04: Page_size. In that case, <result_page_size> is an [int]
               controlling the desired page size of the result (in CQL3 rows).
               See the section on paging (Section 7) for more details.
-        0x04: With_paging_state. If present, <paging_state> should be present.
+        0x08: With_paging_state. If present, <paging_state> should be present.
               <paging_state> is a [bytes] value that should have been returned
               in a result set (Section 4.2.5.2). If provided, the query will be
               executed but starting from a given paging state. This also to
               continue paging on a different node from the one it has been
               started (See Section 7 for more details).
-        0x05: With serial consistency. If present, <serial_consistency> should be
+        0x10: With serial consistency. If present, <serial_consistency> should be
               present. <serial_consistency> is the [consistency] level for the
               serial phase of conditional updates. That consitency can only be
               either SERIAL or LOCAL_SERIAL and if not present, it defaults to
@@ -484,7 +485,7 @@ Table of Contents
                       [bytes] value that should be used in QUERY/EXECUTE to
                       continue paging and retrieve the remained of the result for
                       this query (See Section 7 for more details).
-            0x0003    No_metadata: if set, the <metadata> is only composed of
+            0x0004    No_metadata: if set, the <metadata> is only composed of
                       these <flags>, the <column_count> and optionally the
                       <paging_state> (depending on the Has_more_pages flage) but
                       no other information (so no <global_table_spec> nor <col_spec_i>).
@@ -497,15 +498,21 @@ Table of Contents
           <flags>. If present, it is composed of two [string] representing the
           (unique) keyspace name and table name the columns return are of.
         - <col_spec_i> specifies the columns returned in the query. There is
-          <column_count> such column specification that are composed of:
-            (<ksname><tablename>)?<column_name><type>
+          <column_count> such column specifications that are composed of:
+            (<ksname><tablename>)?<name><type>
           The initial <ksname> and <tablename> are two [string] are only present
           if the Global_tables_spec flag is not set. The <column_name> is a
-          [string] and <type> is an [option] that correspond to the column name
-          and type. The option for <type> is either a native type (see below),
-          in which case the option has no value, or a 'custom' type, in which
-          case the value is a [string] representing the full qualified class
-          name of the type represented. Valid option ids are:
+          [string] and <type> is an [option] that correspond to the description
+          (what this description is depends a bit on the context: in results to
+          selects, this will be either the user chosen alias or the selection used
+          (often a colum name, but it can be a function call too). In results to
+          a PREPARE, this will be either the name of the bind variable corresponding
+          or the column name for the variable if it is "anonymous") and type of
+          the corresponding result. The option for <type> is either a native
+          type (see below), in which case the option has no value, or a
+          'custom' type, in which case the value is a [string] representing
+          the full qualified class name of the type represented. Valid option
+          ids are:
             0x0000    Custom: the value is a [string], see above.
             0x0001    Ascii
             0x0002    Bigint

@@ -27,7 +27,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.composites.CellName;
+import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.MapType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -187,7 +190,7 @@ public abstract class Maps
             return false;
         }
 
-        public void collectMarkerSpecification(ColumnSpecification[] boundNames)
+        public void collectMarkerSpecification(VariableSpecifications boundNames)
         {
         }
 
@@ -236,17 +239,17 @@ public abstract class Maps
 
     public static class Setter extends Operation
     {
-        public Setter(ColumnIdentifier column, Term t)
+        public Setter(ColumnDefinition column, Term t)
         {
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
             // delete + put
-            ColumnNameBuilder column = prefix.add(columnName.key);
-            cf.addAtom(params.makeTombstoneForOverwrite(column.build(), column.buildAsEndOfRange()));
-            Putter.doPut(t, cf, column, params);
+            CellName name = cf.getComparator().create(prefix, column.name);
+            cf.addAtom(params.makeTombstoneForOverwrite(name.slice()));
+            Putter.doPut(t, cf, prefix, column.name, params);
         }
     }
 
@@ -254,27 +257,27 @@ public abstract class Maps
     {
         private final Term k;
 
-        public SetterByKey(ColumnIdentifier column, Term k, Term t)
+        public SetterByKey(ColumnDefinition column, Term k, Term t)
         {
             super(column, t);
             this.k = k;
         }
 
         @Override
-        public void collectMarkerSpecification(ColumnSpecification[] boundNames)
+        public void collectMarkerSpecification(VariableSpecifications boundNames)
         {
             super.collectMarkerSpecification(boundNames);
             k.collectMarkerSpecification(boundNames);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
             ByteBuffer key = k.bindAndGet(params.variables);
             ByteBuffer value = t.bindAndGet(params.variables);
             if (key == null)
                 throw new InvalidRequestException("Invalid null map key");
 
-            ByteBuffer cellName = prefix.add(columnName.key).add(key).build();
+            CellName cellName = cf.getComparator().create(prefix, column.name, key);
 
             if (value == null)
             {
@@ -295,17 +298,17 @@ public abstract class Maps
 
     public static class Putter extends Operation
     {
-        public Putter(ColumnIdentifier column, Term t)
+        public Putter(ColumnDefinition column, Term t)
         {
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
-            doPut(t, cf, prefix.add(columnName.key), params);
+            doPut(t, cf, prefix, column.name, params);
         }
 
-        static void doPut(Term t, ColumnFamily cf, ColumnNameBuilder columnName, UpdateParameters params) throws InvalidRequestException
+        static void doPut(Term t, ColumnFamily cf, Composite prefix, ColumnIdentifier columnName, UpdateParameters params) throws InvalidRequestException
         {
             Term.Terminal value = t.bind(params.variables);
             if (value == null)
@@ -315,7 +318,7 @@ public abstract class Maps
             Map<ByteBuffer, ByteBuffer> toAdd = ((Maps.Value)value).map;
             for (Map.Entry<ByteBuffer, ByteBuffer> entry : toAdd.entrySet())
             {
-                ByteBuffer cellName = columnName.copy().add(entry.getKey()).build();
+                CellName cellName = cf.getComparator().create(prefix, columnName, entry.getKey());
                 cf.addColumn(params.makeColumn(cellName, entry.getValue()));
             }
         }
@@ -323,19 +326,19 @@ public abstract class Maps
 
     public static class DiscarderByKey extends Operation
     {
-        public DiscarderByKey(ColumnIdentifier column, Term k)
+        public DiscarderByKey(ColumnDefinition column, Term k)
         {
             super(column, k);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
             Term.Terminal key = t.bind(params.variables);
             if (key == null)
                 throw new InvalidRequestException("Invalid null map key");
             assert key instanceof Constants.Value;
 
-            ByteBuffer cellName = prefix.add(columnName.key).add(((Constants.Value)key).bytes).build();
+            CellName cellName = cf.getComparator().create(prefix, column.name, ((Constants.Value)key).bytes);
             cf.addColumn(params.makeTombstone(cellName));
         }
     }

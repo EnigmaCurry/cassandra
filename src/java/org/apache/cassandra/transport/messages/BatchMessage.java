@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.UUID;
 
 import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
 
 import org.apache.cassandra.cql3.Attributes;
 import org.apache.cassandra.cql3.CQLStatement;
@@ -180,9 +179,9 @@ public class BatchMessage extends Message.Request
                 }
 
                 List<ByteBuffer> queryValues = values.get(i);
-                if (queryValues.size() != statement.getBoundsTerms())
+                if (queryValues.size() != statement.getBoundTerms())
                     throw new InvalidRequestException(String.format("There were %d markers(?) in CQL but %d bound variables",
-                                                                    statement.getBoundsTerms(),
+                                                                    statement.getBoundTerms(),
                                                                     queryValues.size()));
                 if (!(statement instanceof ModificationStatement))
                     throw new InvalidRequestException("Invalid statement in batch: only UPDATE, INSERT and DELETE statements are allowed.");
@@ -204,7 +203,7 @@ public class BatchMessage extends Message.Request
             // Note: It's ok at this point to pass a bogus value for the number of bound terms in the BatchState ctor
             // (and no value would be really correct, so we prefer passing a clearly wrong one).
             BatchStatement batch = new BatchStatement(-1, type, statements, Attributes.none());
-            Message.Response response = QueryProcessor.processBatch(batch, consistency, state, values);
+            Message.Response response = QueryProcessor.processBatch(batch, consistency, state, values, queryOrIdList);
 
             if (tracingId != null)
                 response.setTracingId(tracingId);

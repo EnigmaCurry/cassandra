@@ -30,12 +30,7 @@ import java.nio.ByteBuffer;
 import com.google.common.base.Objects;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.Column;
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.ColumnSerializer;
-import org.apache.cassandra.db.EmptyColumns;
-import org.apache.cassandra.db.RowMutation;
-import org.apache.cassandra.db.UnsortedColumns;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
@@ -85,10 +80,10 @@ public class Commit
         return this.ballot.equals(ballot);
     }
 
-    public RowMutation makeMutation()
+    public Mutation makeMutation()
     {
         assert update != null;
-        return new RowMutation(key, update);
+        return new Mutation(key, update);
     }
 
     @Override
@@ -116,9 +111,12 @@ public class Commit
     {
         ColumnFamily cf = updates.cloneMeShallow();
         long t = UUIDGen.microsTimestamp(ballot);
-        cf.deletionInfo().updateAllTimestamp(t);
-        for (Column column : updates)
-            cf.addAtom(column.withUpdatedTimestamp(t));
+        // For the tombstones, we use t-1 so that when insert a collection literall, the range tombstone that deletes the previous values of
+        // the collection and we want that to have a lower timestamp and our new values. Since tombstones wins over normal insert, using t-1
+        // should not be a problem in general (see #6069).
+        cf.deletionInfo().updateAllTimestamp(t-1);
+        for (Cell cell : updates)
+            cf.addAtom(cell.withUpdatedTimestamp(t));
         return cf;
     }
 

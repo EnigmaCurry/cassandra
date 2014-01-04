@@ -39,6 +39,7 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.FSWriteError;
+import org.apache.cassandra.io.sstable.IndexSummaryManager;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.IAllocator;
 import org.apache.cassandra.locator.DynamicEndpointSnitch;
@@ -55,6 +56,12 @@ import org.apache.cassandra.utils.FBUtilities;
 public class DatabaseDescriptor
 {
     private static final Logger logger = LoggerFactory.getLogger(DatabaseDescriptor.class);
+
+    /**
+     * Tokens are serialized in a Gossip VersionedValue String.  VV are restricted to 64KB
+     * when we send them over the wire, which works out to about 1700 tokens.
+     */
+    private static final int MAX_NUM_TOKENS = 1536;
 
     private static IEndpointSnitch snitch;
     private static InetAddress listenAddress; // leave null so we can fall through to getLocalHost
@@ -80,6 +87,7 @@ public class DatabaseDescriptor
 
     private static long keyCacheSizeInMB;
     private static IAllocator memoryAllocator;
+    private static long indexSummaryCapacityInMB;
 
     private static String localDC;
     private static Comparator<InetAddress> localComparator;
@@ -132,8 +140,8 @@ public class DatabaseDescriptor
     {
         conf = config;
 
-        logger.info("Data files directories: " + Arrays.toString(conf.data_file_directories));
-        logger.info("Commit log directory: " + conf.commitlog_directory);
+        logger.info("Data files directories: {}", Arrays.toString(conf.data_file_directories));
+        logger.info("Commit log directory: {}", conf.commitlog_directory);
 
         if (conf.commitlog_sync == null)
         {
@@ -150,7 +158,7 @@ public class DatabaseDescriptor
             {
                 throw new ConfigurationException("Batch sync specified, but commitlog_sync_period_in_ms found. Only specify commitlog_sync_batch_window_in_ms when using batch sync");
             }
-            logger.debug("Syncing log with a batch window of " + conf.commitlog_sync_batch_window_in_ms);
+            logger.debug("Syncing log with a batch window of {}", conf.commitlog_sync_batch_window_in_ms);
         }
         else
         {
@@ -162,7 +170,7 @@ public class DatabaseDescriptor
             {
                 throw new ConfigurationException("commitlog_sync_period_in_ms specified, but commitlog_sync_batch_window_in_ms found.  Only specify commitlog_sync_period_in_ms when using periodic sync.");
             }
-            logger.debug("Syncing log with a period of " + conf.commitlog_sync_period_in_ms);
+            logger.debug("Syncing log with a period of {}", conf.commitlog_sync_period_in_ms);
         }
 
         if (conf.commitlog_total_space_in_mb == null)
@@ -173,21 +181,21 @@ public class DatabaseDescriptor
         {
             conf.disk_access_mode = System.getProperty("os.arch").contains("64") ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
             indexAccessMode = conf.disk_access_mode;
-            logger.info("DiskAccessMode 'auto' determined to be " + conf.disk_access_mode + ", indexAccessMode is " + indexAccessMode );
+            logger.info("DiskAccessMode 'auto' determined to be {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
         }
         else if (conf.disk_access_mode == Config.DiskAccessMode.mmap_index_only)
         {
             conf.disk_access_mode = Config.DiskAccessMode.standard;
             indexAccessMode = Config.DiskAccessMode.mmap;
-            logger.info("DiskAccessMode is " + conf.disk_access_mode + ", indexAccessMode is " + indexAccessMode );
+            logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
         }
         else
         {
             indexAccessMode = conf.disk_access_mode;
-            logger.info("DiskAccessMode is " + conf.disk_access_mode + ", indexAccessMode is " + indexAccessMode );
+            logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
         }
 
-        logger.info("disk_failure_policy is " + conf.disk_failure_policy);
+        logger.info("disk_failure_policy is {}", conf.disk_failure_policy);
 
         /* Authentication and authorization backend, implementing IAuthenticator and IAuthorizer */
         if (conf.authenticator != null)
@@ -223,6 +231,11 @@ public class DatabaseDescriptor
         }
         paritionerName = partitioner.getClass().getCanonicalName();
 
+        if (conf.max_hint_window_in_ms == null)
+        {
+            throw new ConfigurationException("max_hint_window_in_ms cannot be set to null");
+        }
+
         /* phi convict threshold for FailureDetector */
         if (conf.phi_convict_threshold < 5 || conf.phi_convict_threshold > 16)
         {
@@ -245,8 +258,11 @@ public class DatabaseDescriptor
             throw new ConfigurationException("concurrent_replicates must be at least 2");
         }
 
+        if (conf.file_cache_size_in_mb == null)
+            conf.file_cache_size_in_mb = Math.min(512, (int) (Runtime.getRuntime().maxMemory() / (4 * 1048576)));
+
         if (conf.memtable_total_space_in_mb == null)
-            conf.memtable_total_space_in_mb = (int) (Runtime.getRuntime().maxMemory() / (3 * 1048576));
+            conf.memtable_total_space_in_mb = (int) (Runtime.getRuntime().maxMemory() / (4 * 1048576));
         if (conf.memtable_total_space_in_mb <= 0)
             throw new ConfigurationException("memtable_total_space_in_mb must be positive");
         logger.info("Global memtable threshold is enabled at {}MB", conf.memtable_total_space_in_mb);
@@ -264,6 +280,8 @@ public class DatabaseDescriptor
         /* Local IP or hostname to bind services to */
         if (conf.listen_address != null)
         {
+            if (conf.listen_address.equals("0.0.0.0"))
+                throw new ConfigurationException("listen_address cannot be 0.0.0.0!");
             try
             {
                 listenAddress = InetAddress.getByName(conf.listen_address);
@@ -311,6 +329,9 @@ public class DatabaseDescriptor
 
         if (conf.thrift_framed_transport_size_in_mb <= 0)
             throw new ConfigurationException("thrift_framed_transport_size_in_mb must be positive");
+
+        if (conf.native_transport_max_frame_size_in_mb <= 0)
+            throw new ConfigurationException("native_transport_max_frame_size_in_mb must be positive");
 
         /* end point snitch */
         if (conf.endpoint_snitch == null)
@@ -374,10 +395,8 @@ public class DatabaseDescriptor
 
         if (logger.isDebugEnabled() && conf.auto_bootstrap != null)
         {
-            logger.debug("setting auto_bootstrap to " + conf.auto_bootstrap);
+            logger.debug("setting auto_bootstrap to {}", conf.auto_bootstrap);
         }
-
-        logger.info((conf.multithreaded_compaction ? "" : "Not ") + "using multi-threaded compaction");
 
         if (conf.in_memory_compaction_limit_in_mb != null && conf.in_memory_compaction_limit_in_mb <= 0)
         {
@@ -418,6 +437,9 @@ public class DatabaseDescriptor
             for (String token : tokensFromString(conf.initial_token))
                 partitioner.getTokenFactory().validate(token);
 
+        if (conf.num_tokens > MAX_NUM_TOKENS)
+            throw new ConfigurationException(String.format("A maximum number of %d tokens per node is supported", MAX_NUM_TOKENS));
+
         try
         {
             // if key_cache_size_in_mb option was set to "auto" then size of the cache should be "min(5% of Heap (in MB), 100MB)
@@ -434,6 +456,15 @@ public class DatabaseDescriptor
                     + conf.key_cache_size_in_mb + "', supported values are <integer> >= 0.");
         }
 
+        // if set to empty/"auto" then use 5% of Heap size
+        indexSummaryCapacityInMB = (conf.index_summary_capacity_in_mb == null)
+            ? Math.max(1, (int) (Runtime.getRuntime().totalMemory() * 0.05 / 1024 / 1024))
+            : conf.index_summary_capacity_in_mb;
+
+        if (indexSummaryCapacityInMB < 0)
+            throw new ConfigurationException("index_summary_capacity_in_mb option was set incorrectly to '"
+                    + conf.index_summary_capacity_in_mb + "', it should be a non-negative integer.");
+
         memoryAllocator = FBUtilities.newOffHeapAllocator(conf.memory_allocator);
 
         if(conf.encryption_options != null)
@@ -449,15 +480,10 @@ public class DatabaseDescriptor
         memtableAllocator = FBUtilities.classForName(allocatorClass, "allocator");
 
         // Hardcoded system keyspaces
-        List<KSMetaData> systemKeyspaces = Arrays.asList(KSMetaData.systemKeyspace(), KSMetaData.traceKeyspace());
+        List<KSMetaData> systemKeyspaces = Arrays.asList(KSMetaData.systemKeyspace());
         assert systemKeyspaces.size() == Schema.systemKeyspaceNames.size();
         for (KSMetaData ksmd : systemKeyspaces)
-        {
-            // install the definition
-            for (CFMetaData cfm : ksmd.cfMetaData().values())
-                Schema.instance.load(cfm);
-            Schema.instance.setKeyspaceDefinition(ksmd);
-        }
+            Schema.instance.load(ksmd);
 
         /* Load the seeds for node contact points */
         if (conf.seed_provider == null)
@@ -491,6 +517,8 @@ public class DatabaseDescriptor
     /** load keyspace (keyspace) definitions, but do not initialize the keyspace instances. */
     public static void loadSchemas()
     {
+        Schema.instance.loadUserTypes();
+
         ColumnFamilyStore schemaCFS = SystemKeyspace.schemaCFS(SystemKeyspace.SCHEMA_KEYSPACES_CF);
 
         // if keyspace with definitions is empty try loading the old way
@@ -582,13 +610,13 @@ public class DatabaseDescriptor
         }
         catch (ConfigurationException e)
         {
-            logger.error("Fatal error: " + e.getMessage());
+            logger.error("Fatal error: {}", e.getMessage());
             System.err.println("Bad configuration; unable to start server");
             System.exit(1);
         }
         catch (FSWriteError e)
         {
-            logger.error("Fatal error: " + e.getMessage());
+            logger.error("Fatal error: {}", e.getMessage());
             System.err.println(e.getCause().getMessage() + "; unable to start server");
             System.exit(1);
         }
@@ -658,6 +686,21 @@ public class DatabaseDescriptor
         return conf.num_tokens;
     }
 
+    public static InetAddress getReplaceAddress()
+    {
+        try
+        {
+            if (System.getProperty("cassandra.replace_address", null) != null)
+                return InetAddress.getByName(System.getProperty("cassandra.replace_address", null));
+            else
+                return null;
+        }
+        catch (UnknownHostException e)
+        {
+            return null;
+        }
+    }
+
     public static Collection<String> getReplaceTokens()
     {
         return tokensFromString(System.getProperty("cassandra.replace_token", null));
@@ -676,7 +719,7 @@ public class DatabaseDescriptor
 
     public static boolean isReplacing()
     {
-        return 0 != getReplaceTokens().size() || getReplaceNode() != null;
+        return getReplaceAddress() != null;
     }
 
     public static String getClusterName()
@@ -702,6 +745,11 @@ public class DatabaseDescriptor
     public static int getRpcPort()
     {
         return Integer.parseInt(System.getProperty("cassandra.rpc_port", conf.rpc_port.toString()));
+    }
+
+    public static int getRpcListenBacklog()
+    {
+        return conf.rpc_listen_backlog;
     }
 
     public static long getRpcTimeout()
@@ -782,6 +830,7 @@ public class DatabaseDescriptor
                 return getTruncateRpcTimeout();
             case READ_REPAIR:
             case MUTATION:
+            case COUNTER_MUTATION:
                 return getWriteRpcTimeout();
             default:
                 return getRpcTimeout();
@@ -841,11 +890,6 @@ public class DatabaseDescriptor
         return conf.concurrent_compactors;
     }
 
-    public static boolean isMultithreadedCompaction()
-    {
-        return conf.multithreaded_compaction;
-    }
-
     public static int getCompactionThroughputMbPerSec()
     {
         return conf.compaction_throughput_mb_per_sec;
@@ -874,6 +918,26 @@ public class DatabaseDescriptor
     public static String getCommitLogLocation()
     {
         return conf.commitlog_directory;
+    }
+
+    public static int getTombstoneWarnThreshold()
+    {
+        return conf.tombstone_warn_threshold;
+    }
+
+    public static void setTombstoneWarnThreshold(int threshold)
+    {
+        conf.tombstone_warn_threshold = threshold;
+    }
+
+    public static int getTombstoneFailureThreshold()
+    {
+        return conf.tombstone_failure_threshold;
+    }
+
+    public static void setTombstoneFailureThreshold(int threshold)
+    {
+        conf.tombstone_failure_threshold = threshold;
     }
 
     /**
@@ -984,13 +1048,24 @@ public class DatabaseDescriptor
         return conf.native_transport_max_threads;
     }
 
+    public static int getNativeTransportMaxFrameSize()
+    {
+        return conf.native_transport_max_frame_size_in_mb * 1024 * 1024;
+    }
+
     public static double getCommitLogSyncBatchWindow()
     {
         return conf.commitlog_sync_batch_window_in_ms;
     }
 
-    public static int getCommitLogSyncPeriod() {
+    public static int getCommitLogSyncPeriod()
+    {
         return conf.commitlog_sync_period_in_ms;
+    }
+
+    public static int getCommitLogPeriodicQueueSize()
+    {
+        return conf.commitlog_periodic_queue_size;
     }
 
     public static Config.CommitLogSync getCommitLogSync()
@@ -1060,7 +1135,7 @@ public class DatabaseDescriptor
 
     public static File getSerializedCachePath(String ksName, String cfName, CacheService.CacheType cacheType, String version)
     {
-        return new File(conf.saved_caches_directory + File.separator + ksName + "-" + cfName + "-" + cacheType + (version == null ? "" : "-" + version + ".db"));
+        return new File(conf.saved_caches_directory, ksName + "-" + cfName + "-" + cacheType + (version == null ? "" : "-" + version + ".db"));
     }
 
     public static int getDynamicUpdateInterval()
@@ -1131,6 +1206,11 @@ public class DatabaseDescriptor
         return conf.memtable_flush_queue_size;
     }
 
+    public static int getFileCacheSizeInMB()
+    {
+        return conf.file_cache_size_in_mb;
+    }
+
     public static int getTotalMemtableSpaceInMB()
     {
         // should only be called if estimatesRealMemtableSize() is true
@@ -1158,6 +1238,11 @@ public class DatabaseDescriptor
         return keyCacheSizeInMB;
     }
 
+    public static long getIndexSummaryCapacityInMB()
+    {
+        return indexSummaryCapacityInMB;
+    }
+
     public static int getKeyCacheSavePeriod()
     {
         return conf.key_cache_save_period;
@@ -1171,6 +1256,11 @@ public class DatabaseDescriptor
     public static int getKeyCacheKeysToSave()
     {
         return conf.key_cache_keys_to_save;
+    }
+
+    public static void setKeyCacheKeysToSave(int keyCacheKeysToSave)
+    {
+        conf.key_cache_keys_to_save = keyCacheKeysToSave;
     }
 
     public static long getRowCacheSizeInMB()
@@ -1196,6 +1286,11 @@ public class DatabaseDescriptor
     public static IAllocator getoffHeapMemoryAllocator()
     {
         return memoryAllocator;
+    }
+
+    public static void setRowCacheKeysToSave(int rowCacheKeysToSave)
+    {
+        conf.row_cache_keys_to_save = rowCacheKeysToSave;
     }
 
     public static int getStreamingSocketTimeout()
@@ -1238,5 +1333,10 @@ public class DatabaseDescriptor
         {
             throw new RuntimeException(e);
         }
+    }
+
+    public static int getIndexSummaryResizeIntervalInMinutes()
+    {
+        return conf.index_summary_resize_interval_in_minutes;
     }
 }

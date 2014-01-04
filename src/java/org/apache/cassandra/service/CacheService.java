@@ -25,7 +25,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -40,7 +39,9 @@ import org.apache.cassandra.cache.*;
 import org.apache.cassandra.cache.AutoSavingCache.CacheSerializer;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -48,7 +49,6 @@ import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.sstable.SSTableReader.Operator;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
@@ -184,13 +184,13 @@ public class CacheService implements CacheServiceMBean
         return DatabaseDescriptor.getRowCacheSavePeriod();
     }
 
-    public void setRowCacheSavePeriodInSeconds(int rcspis)
+    public void setRowCacheSavePeriodInSeconds(int seconds)
     {
-        if (rcspis < 0)
+        if (seconds < 0)
             throw new RuntimeException("RowCacheSavePeriodInSeconds must be non-negative.");
 
-        DatabaseDescriptor.setRowCacheSavePeriod(rcspis);
-        rowCache.scheduleSaving(rcspis, DatabaseDescriptor.getRowCacheKeysToSave());
+        DatabaseDescriptor.setRowCacheSavePeriod(seconds);
+        rowCache.scheduleSaving(seconds, DatabaseDescriptor.getRowCacheKeysToSave());
     }
 
     public int getKeyCacheSavePeriodInSeconds()
@@ -198,13 +198,39 @@ public class CacheService implements CacheServiceMBean
         return DatabaseDescriptor.getKeyCacheSavePeriod();
     }
 
-    public void setKeyCacheSavePeriodInSeconds(int kcspis)
+    public void setKeyCacheSavePeriodInSeconds(int seconds)
     {
-        if (kcspis < 0)
+        if (seconds < 0)
             throw new RuntimeException("KeyCacheSavePeriodInSeconds must be non-negative.");
 
-        DatabaseDescriptor.setKeyCacheSavePeriod(kcspis);
-        keyCache.scheduleSaving(kcspis, DatabaseDescriptor.getKeyCacheKeysToSave());
+        DatabaseDescriptor.setKeyCacheSavePeriod(seconds);
+        keyCache.scheduleSaving(seconds, DatabaseDescriptor.getKeyCacheKeysToSave());
+    }
+
+    public int getRowCacheKeysToSave()
+    {
+        return DatabaseDescriptor.getRowCacheKeysToSave();
+    }
+
+    public void setRowCacheKeysToSave(int count)
+    {
+        if (count < 0)
+            throw new RuntimeException("RowCacheKeysToSave must be non-negative.");
+        DatabaseDescriptor.setRowCacheKeysToSave(count);
+        rowCache.scheduleSaving(getRowCacheSavePeriodInSeconds(), count);
+    }
+
+    public int getKeyCacheKeysToSave()
+    {
+        return DatabaseDescriptor.getKeyCacheKeysToSave();
+    }
+
+    public void setKeyCacheKeysToSave(int count)
+    {
+        if (count < 0)
+            throw new RuntimeException("KeyCacheKeysToSave must be non-negative.");
+        DatabaseDescriptor.setKeyCacheKeysToSave(count);
+        keyCache.scheduleSaving(getKeyCacheSavePeriodInSeconds(), count);
     }
 
     public void invalidateKeyCache()
@@ -305,17 +331,6 @@ public class CacheService implements CacheServiceMBean
                 }
             });
         }
-
-        public void load(Set<ByteBuffer> buffers, ColumnFamilyStore cfs)
-        {
-            for (ByteBuffer key : buffers)
-            {
-                DecoratedKey dk = cfs.partitioner.decorateKey(key);
-                ColumnFamily data = cfs.getTopLevelColumns(QueryFilter.getIdentityFilter(dk, cfs.name, Long.MIN_VALUE), Integer.MIN_VALUE);
-                if (data != null)
-                    rowCache.put(new RowCacheKey(cfs.metadata.cfId, dk), data);
-            }
-        }
     }
 
     public class KeyCacheSerializer implements CacheSerializer<KeyCacheKey, RowIndexEntry>
@@ -329,21 +344,28 @@ public class CacheService implements CacheServiceMBean
             Descriptor desc = key.desc;
             out.writeInt(desc.generation);
             out.writeBoolean(true);
-            RowIndexEntry.serializer.serialize(entry, out);
+            CFMetaData cfm = Schema.instance.getCFMetaData(key.desc.ksname, key.desc.cfname);
+            cfm.comparator.rowIndexEntrySerializer().serialize(entry, out);
         }
 
         public Future<Pair<KeyCacheKey, RowIndexEntry>> deserialize(DataInputStream input, ColumnFamilyStore cfs) throws IOException
         {
-            ByteBuffer key = ByteBufferUtil.readWithLength(input);
+            int keyLength = input.readInt();
+            if (keyLength > FBUtilities.MAX_UNSIGNED_SHORT)
+            {
+                throw new IOException(String.format("Corrupted key cache. Key length of %d is longer than maximum of %d",
+                                                    keyLength, FBUtilities.MAX_UNSIGNED_SHORT));
+            }
+            ByteBuffer key = ByteBufferUtil.read(input, keyLength);
             int generation = input.readInt();
             SSTableReader reader = findDesc(generation, cfs.getSSTables());
             input.readBoolean(); // backwards compatibility for "promoted indexes" boolean
             if (reader == null)
             {
-                RowIndexEntry.serializer.skipPromotedIndex(input);
+                RowIndexEntry.Serializer.skipPromotedIndex(input);
                 return null;
             }
-            RowIndexEntry entry = RowIndexEntry.serializer.deserialize(input, reader.descriptor.version);
+            RowIndexEntry entry = reader.metadata.comparator.rowIndexEntrySerializer().deserialize(input, reader.descriptor.version);
             return Futures.immediateFuture(Pair.create(new KeyCacheKey(reader.descriptor, key), entry));
         }
 
@@ -355,21 +377,6 @@ public class CacheService implements CacheServiceMBean
                     return sstable;
             }
             return null;
-        }
-
-        public void load(Set<ByteBuffer> buffers, ColumnFamilyStore cfs)
-        {
-            for (ByteBuffer key : buffers)
-            {
-                DecoratedKey dk = cfs.partitioner.decorateKey(key);
-
-                for (SSTableReader sstable : cfs.getSSTables())
-                {
-                    RowIndexEntry entry = sstable.getPosition(dk, Operator.EQ, false);
-                    if (entry != null)
-                        keyCache.put(new KeyCacheKey(sstable.descriptor, key), entry);
-                }
-            }
         }
     }
 }

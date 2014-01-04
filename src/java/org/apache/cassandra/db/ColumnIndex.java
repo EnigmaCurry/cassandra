@@ -25,6 +25,7 @@ import java.util.*;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -53,8 +54,6 @@ public class ColumnIndex
      */
     public static class Builder
     {
-        private static final OnDiskAtom.Serializer atomSerializer = Column.onDiskSerializer();
-
         private final ColumnIndex result;
         private final long indexOffset;
         private long startPosition = -1;
@@ -67,7 +66,9 @@ public class ColumnIndex
         private final RangeTombstone.Tracker tombstoneTracker;
         private int atomCount;
         private final ByteBuffer key;
-        private final DeletionInfo deletionInfo;
+        private final DeletionInfo deletionInfo; // only used for serializing and calculating row header size
+
+        private final OnDiskAtom.Serializer atomSerializer;
 
         public Builder(ColumnFamily cf,
                        ByteBuffer key,
@@ -83,6 +84,7 @@ public class ColumnIndex
             this.result = new ColumnIndex(new ArrayList<IndexHelper.IndexInfo>());
             this.output = output;
             this.tombstoneTracker = new RangeTombstone.Tracker(cf.getComparator());
+            this.atomSerializer = cf.getComparator().onDiskAtomSerializer();
         }
 
         /**
@@ -119,18 +121,25 @@ public class ColumnIndex
         public ColumnIndex build(ColumnFamily cf) throws IOException
         {
             // cf has disentangled the columns and range tombstones, we need to re-interleave them in comparator order
+            Comparator<Composite> comparator = cf.getComparator();
+            DeletionInfo.InOrderTester tester = cf.deletionInfo().inOrderTester();
             Iterator<RangeTombstone> rangeIter = cf.deletionInfo().rangeIterator();
             RangeTombstone tombstone = rangeIter.hasNext() ? rangeIter.next() : null;
-            Comparator<ByteBuffer> comparator = cf.getComparator();
 
-            for (Column c : cf)
+            for (Cell c : cf)
             {
                 while (tombstone != null && comparator.compare(c.name(), tombstone.min) >= 0)
                 {
-                    add(tombstone);
+                    // skip range tombstones that are shadowed by partition tombstones
+                    if (!cf.deletionInfo().getTopLevelDeletion().isDeleted(tombstone))
+                        add(tombstone);
                     tombstone = rangeIter.hasNext() ? rangeIter.next() : null;
                 }
-                add(c);
+
+                // We can skip any cell if it's shadowed by a tombstone already.  This is a more
+                // general case than was handled by CASSANDRA-2589.
+                if (!tester.isDeleted(c))
+                    add(c);
             }
 
             while (tombstone != null)
@@ -140,20 +149,26 @@ public class ColumnIndex
             }
             ColumnIndex index = build();
 
-            finish();
+            maybeWriteEmptyRowHeader();
 
             return index;
         }
 
-        public ColumnIndex build(Iterable<OnDiskAtom> columns) throws IOException
+        /**
+         * The important distinction wrt build() is that we may be building for a row that ends up
+         * being compacted away entirely, i.e., the input consists only of expired tombstones (or
+         * columns shadowed by expired tombstone).  Thus, it is the caller's responsibility
+         * to decide whether to write the header for an empty row.
+         */
+        public ColumnIndex buildForCompaction(Iterator<OnDiskAtom> columns) throws IOException
         {
-            for (OnDiskAtom c : columns)
+            while (columns.hasNext())
+            {
+                OnDiskAtom c =  columns.next();
                 add(c);
-            ColumnIndex index = build();
+            }
 
-            finish();
-
-            return index;
+            return build();
         }
 
         public void add(OnDiskAtom column) throws IOException
@@ -170,7 +185,7 @@ public class ColumnIndex
                                // where we wouldn't make any progress because a block is filled by said marker
             }
 
-            long size = column.serializedSizeForSSTable();
+            long size = atomSerializer.serializedSizeForSSTable(column);
             endPosition += size;
             blockSize += size;
 
@@ -219,7 +234,7 @@ public class ColumnIndex
             return result;
         }
 
-        public void finish() throws IOException
+        public void maybeWriteEmptyRowHeader() throws IOException
         {
             if (!deletionInfo.isLive())
                 maybeWriteRowHeader();

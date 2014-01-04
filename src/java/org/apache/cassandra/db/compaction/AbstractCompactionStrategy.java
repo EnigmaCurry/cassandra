@@ -26,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -166,7 +167,7 @@ public abstract class AbstractCompactionStrategy
     /**
      * @return size in bytes of the largest sstables for this strategy
      */
-    public abstract long getMaxSSTableSize();
+    public abstract long getMaxSSTableBytes();
 
     public boolean isEnabled()
     {
@@ -181,6 +182,35 @@ public abstract class AbstractCompactionStrategy
     public void disable()
     {
         this.enabled = false;
+    }
+
+    /**
+     * @return whether or not MeteredFlusher should be able to trigger memtable flushes for this CF.
+     */
+    public boolean isAffectedByMeteredFlusher()
+    {
+        return true;
+    }
+
+    /**
+     * Handle a flushed memtable.
+     *
+     * @param memtable the flushed memtable
+     * @param sstable the written sstable. can be null if the memtable was clean.
+     */
+    public void replaceFlushed(Memtable memtable, SSTableReader sstable)
+    {
+        cfs.getDataTracker().replaceFlushed(memtable, sstable);
+        if (sstable != null)
+            CompactionManager.instance.submitBackground(cfs);
+    }
+
+    /**
+     * @return a subset of the suggested sstables that are relevant for read requests.
+     */
+    public List<SSTableReader> filterSSTablesForReads(List<SSTableReader> sstables)
+    {
+        return sstables;
     }
 
     /**
@@ -253,7 +283,7 @@ public abstract class AbstractCompactionStrategy
         else
         {
             // what percentage of columns do we expect to compact outside of overlap?
-            if (sstable.getKeySampleSize() < 2)
+            if (sstable.getIndexSummarySize() < 2)
             {
                 // we have too few samples to estimate correct percentage
                 return false;

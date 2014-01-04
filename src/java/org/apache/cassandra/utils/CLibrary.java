@@ -65,7 +65,7 @@ public final class CLibrary
         catch (UnsatisfiedLinkError e)
         {
             logger.info("JNA link failure, one or more native method will be unavailable.");
-            logger.debug("JNA link failure details: " + e.getMessage());
+            logger.debug("JNA link failure details: {}", e.getMessage());
         }
         catch (NoSuchMethodError e)
         {
@@ -75,8 +75,6 @@ public final class CLibrary
 
     private static native int mlockall(int flags) throws LastErrorException;
     private static native int munlockall() throws LastErrorException;
-
-    private static native int link(String from, String to) throws LastErrorException;
 
     // fcntl - manipulate file descriptor, `man 2 fcntl`
     public static native int fcntl(int fd, int command, long flags) throws LastErrorException;
@@ -139,7 +137,7 @@ public final class CLibrary
             else if (!System.getProperty("os.name").toLowerCase().contains("mac"))
             {
                 // OS X allows mlockall to be called, but always returns an error
-                logger.warn("Unknown mlockall error " + errno(e));
+                logger.warn("Unknown mlockall error {}", errno(e));
             }
         }
     }

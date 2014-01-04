@@ -24,12 +24,15 @@ import java.util.*;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
+import org.apache.cassandra.Util;
+import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.composites.*;
 import org.apache.cassandra.db.marshal.IntegerType;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class RangeTombstoneListTest
 {
-    private static final Comparator<ByteBuffer> cmp = IntegerType.instance;
+    private static final Comparator<Composite> cmp = new SimpleDenseCellNameType(IntegerType.instance);
 
     @Test
     public void sortedAdditionTest()
@@ -103,21 +106,28 @@ public class RangeTombstoneListTest
         assertRT(rt(0, 1, 1), iter.next());
         assertRT(rt(1, 4, 2), iter.next());
         assertRT(rt(4, 8, 3), iter.next());
-        assertRT(rt(8, 10, 4), iter.next());
-        assertRT(rt(10, 13, 4), iter.next());
+        assertRT(rt(8, 13, 4), iter.next());
         assertRT(rt(13, 15, 1), iter.next());
         assert !iter.hasNext();
 
         RangeTombstoneList l2 = new RangeTombstoneList(cmp, initialCapacity);
-        l.add(rt(4, 10, 12L));
-        l.add(rt(0, 8, 25L));
+        l2.add(rt(4, 10, 12L));
+        l2.add(rt(0, 8, 25L));
 
-        assertEquals(25L, l.search(b(8)).markedForDeleteAt);
+        assertEquals(25L, l2.search(b(8)).markedForDeleteAt);
     }
 
     @Test
-    public void overlappingSearchTest()
+    public void largeAdditionTest()
     {
+        int N = 3000;
+        // Test that the StackOverflow from #6181 is fixed
+        RangeTombstoneList l = new RangeTombstoneList(cmp, N);
+        for (int i = 0; i < N; i++)
+            l.add(rt(2*i+1, 2*i+2, 1));
+        assertEquals(l.size(), N);
+
+        l.add(rt(0, 2*N+3, 2));
     }
 
     @Test
@@ -140,6 +150,21 @@ public class RangeTombstoneListTest
         Iterator<RangeTombstone> iter2 = l2.iterator();
         assertRT(rt(0, 10, 3), iter2.next());
         assert !iter2.hasNext();
+    }
+
+    @Test
+    public void overlappingPreviousEndEqualsStartTest()
+    {
+        RangeTombstoneList l = new RangeTombstoneList(cmp, 0);
+        // add a RangeTombstone, so, last insert is not in insertion order
+        l.add(rt(11, 12, 2));
+        l.add(rt(1, 4, 2));
+        l.add(rt(4, 10, 5));
+
+        assertEquals(2, l.search(b(3)).markedForDeleteAt);
+        assertEquals(5, l.search(b(4)).markedForDeleteAt);
+        assertEquals(5, l.search(b(8)).markedForDeleteAt);
+        assertEquals(3, l.size());
     }
 
     @Test
@@ -198,8 +223,7 @@ public class RangeTombstoneListTest
         assertRT(rt(7, 8, 3), iter.next());
         assertRT(rt(8, 10, 2), iter.next());
         assertRT(rt(10, 12, 1), iter.next());
-        assertRT(rt(14, 15, 4), iter.next());
-        assertRT(rt(15, 17, 4), iter.next());
+        assertRT(rt(14, 17, 4), iter.next());
 
         assert !iter.hasNext();
     }
@@ -284,14 +308,14 @@ public class RangeTombstoneListTest
         return String.format("[%d, %d]@%d", i(rt.min), i(rt.max), rt.data.markedForDeleteAt);
     }
 
-    private static ByteBuffer b(int i)
+    private static Composite b(int i)
     {
-        return ByteBufferUtil.bytes(i);
+        return Util.cellname(i);
     }
 
-    private static int i(ByteBuffer bb)
+    private static int i(Composite c)
     {
-        return ByteBufferUtil.toInt(bb);
+        return ByteBufferUtil.toInt(c.toByteBuffer());
     }
 
     private static RangeTombstone rt(int start, int end, long tstamp)

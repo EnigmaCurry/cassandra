@@ -22,12 +22,12 @@ import java.util.*;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ExtendedFilter;
-import org.apache.cassandra.thrift.IndexExpression;
-import org.apache.cassandra.thrift.IndexOperator;
+import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.utils.FBUtilities;
 
 public abstract class SecondaryIndexSearcher
 {
-    protected final SecondaryIndexManager    indexManager;
+    protected final SecondaryIndexManager indexManager;
     protected final Set<ByteBuffer> columns;
     protected final ColumnFamilyStore baseCfs;
 
@@ -36,6 +36,12 @@ public abstract class SecondaryIndexSearcher
         this.indexManager = indexManager;
         this.columns = columns;
         this.baseCfs = indexManager.baseCfs;
+    }
+
+    public SecondaryIndex highestSelectivityIndex(List<IndexExpression> clause)
+    {
+        IndexExpression expr = highestSelectivityPredicate(clause);
+        return expr == null ? null : indexManager.getIndexForColumn(expr.column);
     }
 
     public abstract List<Row> search(ExtendedFilter filter);
@@ -52,22 +58,32 @@ public abstract class SecondaryIndexSearcher
     {
         IndexExpression best = null;
         int bestMeanCount = Integer.MAX_VALUE;
+        Map<SecondaryIndex, Integer> candidates = new HashMap<>();
+
         for (IndexExpression expression : clause)
         {
-            //skip columns belonging to a different index type
-            if(!columns.contains(expression.column_name))
+            // skip columns belonging to a different index type
+            if (!columns.contains(expression.column))
                 continue;
 
-            SecondaryIndex index = indexManager.getIndexForColumn(expression.column_name);
-            if (index == null || (expression.op != IndexOperator.EQ))
+            SecondaryIndex index = indexManager.getIndexForColumn(expression.column);
+            if (index == null || !expression.operator.allowsIndexQuery())
                 continue;
             int columns = index.getIndexCfs().getMeanColumns();
+            candidates.put(index, columns);
             if (columns < bestMeanCount)
             {
                 best = expression;
                 bestMeanCount = columns;
             }
         }
+
+        if (best == null)
+            Tracing.trace("No applicable indexes found");
+        else
+            Tracing.trace("Candidate index mean cardinalities are {}. Scanning with {}.",
+                          FBUtilities.toString(candidates), indexManager.getIndexForColumn(best.column).getIndexName());
+
         return best;
     }
 }

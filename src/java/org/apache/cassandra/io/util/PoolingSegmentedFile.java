@@ -17,10 +17,17 @@
  */
 package org.apache.cassandra.io.util;
 
+import java.io.IOException;
+
 import org.apache.cassandra.service.FileCacheService;
+import org.apache.cassandra.utils.CLibrary;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public abstract class PoolingSegmentedFile extends SegmentedFile
 {
+    private static final Logger logger = LoggerFactory.getLogger(PoolingSegmentedFile.class);
+
     protected PoolingSegmentedFile(String path, long length)
     {
         super(path, length);
@@ -37,6 +44,12 @@ public abstract class PoolingSegmentedFile extends SegmentedFile
 
         if (reader == null)
             reader = createReader(path);
+
+        // let's mark first buffer as sequential (because we are going  to read it right after seek())
+        CLibrary.fadvice(reader.getNativeFD(), position, RandomAccessReader.DEFAULT_BUFFER_SIZE, CLibrary.FileAdvice.SEQUENTIAL);
+        // pre-heat first page so read-ahead kicks in sooner
+        CLibrary.preheatPage(reader.getNativeFD(), position);
+
 
         reader.seek(position);
         return reader;

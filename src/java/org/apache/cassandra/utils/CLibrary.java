@@ -41,12 +41,18 @@ public final class CLibrary
     private static final int O_DIRECT  = 040000; /* fcntl.h */
     private static final int O_RDONLY  = 00000000; /* fcntl.h */
 
-    private static final int POSIX_FADV_NORMAL     = 0; /* fadvise.h */
-    private static final int POSIX_FADV_RANDOM     = 1; /* fadvise.h */
-    private static final int POSIX_FADV_SEQUENTIAL = 2; /* fadvise.h */
-    private static final int POSIX_FADV_WILLNEED   = 3; /* fadvise.h */
-    private static final int POSIX_FADV_DONTNEED   = 4; /* fadvise.h */
-    private static final int POSIX_FADV_NOREUSE    = 5; /* fadvise.h */
+    /* fadvise.h */
+    public static enum FileAdvice
+    {
+        NORMAL(0), RANDOM(1), SEQUENTIAL(2), WILL_NEED(3), DONT_NEED(4), NO_REUSE(5);
+
+        private final int advice;
+
+        FileAdvice(int advice)
+        {
+            this.advice = advice;
+        }
+    }
 
     static boolean jnaAvailable = true;
     static boolean jnaLockable = false;
@@ -144,25 +150,8 @@ public final class CLibrary
         if (fd < 0)
             return;
 
-        try
-        {
-            if (System.getProperty("os.name").toLowerCase().contains("linux"))
-            {
-                posix_fadvise(fd, offset, len, POSIX_FADV_DONTNEED);
-            }
-        }
-        catch (UnsatisfiedLinkError e)
-        {
-            // if JNA is unavailable just skipping Direct I/O
-            // instance of this class will act like normal RandomAccessFile
-        }
-        catch (RuntimeException e)
-        {
-            if (!(e instanceof LastErrorException))
-                throw e;
-
-            logger.warn(String.format("posix_fadvise(%d, %d) failed, errno (%d).", fd, offset, errno(e)));
-        }
+        if (System.getProperty("os.name").toLowerCase().contains("linux"))
+            fadvice(fd, offset, len, FileAdvice.DONT_NEED);
     }
 
     public static int tryFcntl(int fd, int command, int flags)
@@ -280,20 +269,18 @@ public final class CLibrary
         return -1;
     }
 
-    /**
-     * Suggest kernel to preheat one page for the given file.
-     *
-     * @param fd The file descriptor of file to preheat.
-     * @param position The offset of the block.
-     *
-     * @return On success, zero is returned. On error, an error number is returned.
-     */
-    public static int preheatPage(int fd, long position)
+    public static int fadvice(int fd, long pos, int len, FileAdvice advice)
     {
+        if (fd < 0)
+            return -1;
+
         try
         {
-            // 4096 is good for SSD because they operate on "Pages" 4KB in size
-            return posix_fadvise(fd, position, 4096, POSIX_FADV_WILLNEED);
+            int res = posix_fadvise(fd, pos, len, advice.advice);
+            if (res < 0)
+                logger.warn(String.format("posix_fadvise(%d, %d, %d, %s) failed, return (%d).", fd, pos, len, advice, res));
+
+            return res;
         }
         catch (UnsatisfiedLinkError e)
         {
@@ -304,9 +291,22 @@ public final class CLibrary
             if (!(e instanceof LastErrorException))
                 throw e;
 
-            logger.warn(String.format("posix_fadvise(%d, %d) failed, errno (%d).", fd, position, errno(e)));
+            logger.warn(String.format("posix_fadvise(%d, %d, %d, %s) failed, errno (%d).", fd, pos, len, advice, errno(e)));
         }
 
         return -1;
+    }
+
+    /**
+     * Suggest kernel to preheat one page for the given file.
+     *
+     * @param fd The file descriptor of file to preheat.
+     * @param position The offset of the block.
+     *
+     * @return On success, zero is returned. On error, an error number is returned.
+     */
+    public static int preheatPage(int fd, long position)
+    {
+        return fadvice(fd, position, 4096, FileAdvice.WILL_NEED);
     }
 }

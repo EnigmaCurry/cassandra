@@ -24,6 +24,7 @@ import java.nio.channels.FileChannel;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.io.FSReadError;
+import org.apache.cassandra.utils.CLibrary;
 
 public class RandomAccessReader extends RandomAccessFile implements FileDataInput
 {
@@ -49,6 +50,7 @@ public class RandomAccessReader extends RandomAccessFile implements FileDataInpu
     // channel liked with the file, used to retrieve data and force updates.
     protected final FileChannel channel;
 
+    private final int fd; // underlying file descriptor
     private final long fileLength;
 
     protected final PoolingSegmentedFile owner;
@@ -72,6 +74,9 @@ public class RandomAccessReader extends RandomAccessFile implements FileDataInpu
         try
         {
             fileLength = channel.size();
+
+            fd = CLibrary.getfd(getFD());
+            CLibrary.fadvice(fd, 0, 0, CLibrary.FileAdvice.RANDOM); // shrink read-ahead for this file
         }
         catch (IOException e)
         {
@@ -386,5 +391,10 @@ public class RandomAccessReader extends RandomAccessFile implements FileDataInpu
     public void write(byte[] buffer, int offset, int length)
     {
         throw new UnsupportedOperationException();
+    }
+
+    public int getNativeFD()
+    {
+        return fd;
     }
 }

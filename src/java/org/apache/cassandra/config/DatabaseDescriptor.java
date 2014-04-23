@@ -187,7 +187,7 @@ public class DatabaseDescriptor
         }
 
         if (conf.commitlog_total_space_in_mb == null)
-            conf.commitlog_total_space_in_mb = hasLargeAddressSpace() ? 1024 : 32;
+            conf.commitlog_total_space_in_mb = hasLargeAddressSpace() ? 8 * 1024 : 32;
 
         /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
         if (conf.disk_access_mode == Config.DiskAccessMode.auto)
@@ -1159,11 +1159,6 @@ public class DatabaseDescriptor
     public static int getCommitLogSyncPeriod()
     {
         return conf.commitlog_sync_period_in_ms;
-    }
-
-    public static int getCommitLogPeriodicQueueSize()
-    {
-        return conf.commitlog_periodic_queue_size;
     }
 
     public static Config.CommitLogSync getCommitLogSync()

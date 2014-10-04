@@ -1,6 +1,6 @@
 package org.apache.cassandra.stress.settings;
 /*
- * 
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,20 +8,20 @@ package org.apache.cassandra.stress.settings;
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * 
+ *
  */
 
 
-import java.io.Serializable;
+import java.io.*;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -31,11 +31,31 @@ public class SettingsGraph implements Serializable
 
     public final String file;
     public final String revision;
+    public final File temporaryLogFile;
 
     public SettingsGraph(GraphOptions options)
     {
         file = options.file.value();
         revision = options.revision.value();
+        if (inGraphMode()) {
+            try {
+                temporaryLogFile = File.createTempFile("cassandra-stress", ".log");
+            } catch (IOException e) {
+                throw new RuntimeException("Cannot open temporary file");
+            }
+        } else {
+            temporaryLogFile = null;
+        }
+    }
+
+    /** Are we in graphing mode?
+     */
+    public boolean inGraphMode() {
+        return this.file == null ? false : true;
+    }
+
+    public void cleanup() {
+        temporaryLogFile.delete();
     }
 
     // Option Declarations

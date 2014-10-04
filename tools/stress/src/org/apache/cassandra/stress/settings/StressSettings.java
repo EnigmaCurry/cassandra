@@ -54,6 +54,7 @@ public class StressSettings implements Serializable
     public final SettingsTransport transport;
     public final SettingsPort port;
     public final String sendToDaemon;
+    public final SettingsGraph graph;
 
     public StressSettings(SettingsCommand command, SettingsRate rate, SettingsPopulation generate, SettingsInsert insert, SettingsColumn columns, SettingsSamples samples, SettingsErrors errors, SettingsLog log, SettingsMode mode, SettingsNode node, SettingsSchema schema, SettingsTransport transport, SettingsPort port, String sendToDaemon, SettingsGraph graph)
     {
@@ -71,6 +72,7 @@ public class StressSettings implements Serializable
         this.transport = transport;
         this.port = port;
         this.sendToDaemon = sendToDaemon;
+        this.graph = graph;
     }
 
     private SmartThriftClient tclient;

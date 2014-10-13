@@ -21,8 +21,12 @@ package org.apache.cassandra.stress.settings;
  */
 
 
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
+import java.io.Serializable;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
@@ -31,31 +35,45 @@ public class SettingsGraph implements Serializable
 
     public final String file;
     public final String revision;
+    public final String title;
     public final File temporaryLogFile;
 
     public SettingsGraph(GraphOptions options)
     {
         file = options.file.value();
         revision = options.revision.value();
-        if (inGraphMode()) {
-            try {
+        if (options.title.value() == null)
+        {
+            title = "cassandra-stress - " + new SimpleDateFormat("yyyy-mm-dd hh:mm:ss").format(new Date());
+        }
+        else
+        {
+            title = options.title.value();
+        }
+
+        if (inGraphMode())
+        {
+            try
+            {
                 temporaryLogFile = File.createTempFile("cassandra-stress", ".log");
-            } catch (IOException e) {
+            }
+            catch (IOException e)
+            {
                 throw new RuntimeException("Cannot open temporary file");
             }
-        } else {
+        }
+        else
+        {
             temporaryLogFile = null;
         }
     }
 
-    /** Are we in graphing mode?
+    /**
+     * Are we in graphing mode?
      */
-    public boolean inGraphMode() {
+    public boolean inGraphMode()
+    {
         return this.file == null ? false : true;
-    }
-
-    public void cleanup() {
-        temporaryLogFile.delete();
     }
 
     // Option Declarations
@@ -64,10 +82,12 @@ public class SettingsGraph implements Serializable
     {
         final OptionSimple file = new OptionSimple("file=", ".*", null, "HTML file to generate", true);
         final OptionSimple revision = new OptionSimple("revision=", ".*", "unknown", "Unique name to give to a collection of results in the graph", false);
+        final OptionSimple title = new OptionSimple("title=", ".*", null, "Title for chart", false);
+
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(file, revision);
+            return Arrays.asList(file, revision, title);
         }
     }
 

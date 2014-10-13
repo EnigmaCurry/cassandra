@@ -124,7 +124,16 @@ public final class Stress
         }
         catch (Throwable t)
         {
+<<<<<<< 09ba1cca6cff68cacf7bc30d6c3d4484021c51f6
             t.printStackTrace();
+=======
+            StressAction stressAction = new StressAction(settings, logout);
+            stressAction.run();
+            if (settings.graph.inGraphMode())
+            {
+                new StressGraph(settings).generateGraph();
+            }
+>>>>>>> progress
         }
         finally
         {

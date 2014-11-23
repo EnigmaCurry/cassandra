@@ -13,10 +13,8 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
+import java.io.PrintWriter;
 import java.util.Arrays;
-import java.util.Date;
 
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
@@ -40,6 +38,7 @@ public class StressGraph
 {
 
     private StressSettings stressSettings;
+    private enum readingMode {NONE, METRICS, AGGREGATES};
 
     public StressGraph(StressSettings stressSetttings)
     {
@@ -57,9 +56,21 @@ public class StressGraph
         }
         else
         {
-            stats = this.createJSONStats();
+            stats = this.createJSONStats(null);
         }
-        System.out.print(stats.toJSONString());
+        System.out.println(stats);
+        try
+        {
+            PrintWriter out = new PrintWriter(htmlFile);
+            String statsBlock = "/* stats start */\nstats = " + stats.toJSONString() + ";\n/* stats end */\n";
+            String html = getGraphHTML().replaceFirst("/\\* stats start \\*/\n\n/\\* stats end \\*/\n", statsBlock);
+            out.write(html);
+            out.close();
+        }
+        catch (IOException e)
+        {
+            e.printStackTrace();
+        }
     }
 
     private String getGraphHTML()
@@ -77,46 +88,95 @@ public class StressGraph
         return graphHTML;
     }
 
-    public JSONObject parseLogIntoIntervals(InputStream log) {
+    private JSONObject parseLogStats(InputStream log) {
         BufferedReader reader = new BufferedReader(new InputStreamReader(log));
         JSONObject json = new JSONObject();
+        JSONArray intervals = new JSONArray();
         json.put("metrics", Arrays.asList(StressMetrics.HEADMETRICS));
-        boolean readingMetrics = false;
+        json.put("test", stressSettings.command.type.name());
+        json.put("revision", stressSettings.graph.revision);
+        
+        readingMode mode = readingMode.NONE;
         try
         {
-            String line = reader.readLine();
-            while (line != null) {
-                if (line == StressMetrics.HEAD) {
-                    readingMetrics = true;
-                }
+            String line;
+            while (true)
+            {
+                //Read the next line, break if null:
                 line = reader.readLine();
+                if (line == null)
+                {
+                    break;
+                }
+
+                //Detect mode changes:
+                if (line.equals(StressMetrics.HEAD))
+                {
+                    mode = readingMode.METRICS;
+                    continue;
+                }
+                else if (line.equals("Results:"))
+                {
+                    mode = readingMode.AGGREGATES;
+                    continue;
+                }
+                else if (line == "END")
+                {
+                    mode = readingMode.NONE;
+                    break;
+                }
+
+                //Process lines:
+                if (mode == readingMode.METRICS)
+                {
+                    JSONArray metrics = new JSONArray();
+                    String[] parts = line.split(",");
+                    if (parts.length != StressMetrics.HEADMETRICS.length){
+                        continue;
+                    }
+                    for (String m : parts)
+                    {
+                        metrics.add(m.trim());
+                    }
+                    intervals.add(metrics);
+                }
+                else if (mode == readingMode.AGGREGATES)
+                {
+
+                }
             }
         }
         catch (IOException e)
         {
             e.printStackTrace();
         }
+
+        json.put("intervals", intervals);
         return json;
     }
 
-    private JSONObject createJSONStats()
+    private JSONObject createJSONStats(JSONObject json)
     {
-        JSONObject json = new JSONObject();
-        json.put("title", stressSettings.graph.title);
-        JSONArray stats = new JSONArray();
-        json.put("stats", stats);
-        JSONObject intervals;
+        JSONArray stats;
+        JSONObject parsedMetrics;
+        if(json == null){
+            json = new JSONObject();
+            stats = new JSONArray();
+        } else {
+            stats = (JSONArray) json.get("stats");
+        }
 
         try
         {
-            intervals = parseLogIntoIntervals(new FileInputStream(stressSettings.graph.temporaryLogFile));
-            json.put("metrics", intervals.get("metrics"));
+            stats.add(parseLogStats(new FileInputStream(stressSettings.graph.temporaryLogFile)));
         }
         catch (FileNotFoundException e)
         {
             throw new RuntimeException(e);
         }
 
+        json.put("title", stressSettings.graph.title);
+        json.put("stats", stats);
         return json;
     }
 }

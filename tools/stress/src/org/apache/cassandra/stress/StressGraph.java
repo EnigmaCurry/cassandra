@@ -125,7 +125,7 @@ public class StressGraph
         JSONObject json = new JSONObject();
         JSONArray intervals = new JSONArray();
         json.put("metrics", Arrays.asList(StressMetrics.HEADMETRICS));
-        json.put("test", stressSettings.command.type.name());
+        json.put("test", stressSettings.graph.operation);
         json.put("revision", stressSettings.graph.revision);
 
         readingMode mode = readingMode.NONE;

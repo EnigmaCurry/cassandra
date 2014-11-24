@@ -264,7 +264,7 @@ public class StressSettings implements Serializable
         SettingsNode node = SettingsNode.get(clArgs);
         SettingsSchema schema = SettingsSchema.get(clArgs, command);
         SettingsTransport transport = SettingsTransport.get(clArgs);
-        SettingsGraph graph = SettingsGraph.get(clArgs);
+        SettingsGraph graph = SettingsGraph.get(clArgs, command);
         if (!clArgs.isEmpty())
         {
             printHelp();

@@ -36,9 +36,10 @@ public class SettingsGraph implements Serializable
     public final String file;
     public final String revision;
     public final String title;
+    public final String operation;
     public final File temporaryLogFile;
 
-    public SettingsGraph(GraphOptions options)
+    public SettingsGraph(GraphOptions options, SettingsCommand stressCommand)
     {
         file = options.file.value();
         revision = options.revision.value();
@@ -49,6 +50,15 @@ public class SettingsGraph implements Serializable
         else
         {
             title = options.title.value();
+        }
+
+        if (options.operation.value() == null)
+        {
+            operation = stressCommand.type.name();
+        }
+        else
+        {
+            operation = options.operation.value();
         }
 
         if (inGraphMode())
@@ -80,25 +90,26 @@ public class SettingsGraph implements Serializable
 
     private static final class GraphOptions extends GroupedOptions
     {
-        final OptionSimple file = new OptionSimple("file=", ".*", null, "HTML file to generate", true);
+        final OptionSimple file = new OptionSimple("file=", ".*", null, "HTML file to create or append to", true);
         final OptionSimple revision = new OptionSimple("revision=", ".*", "unknown", "Unique name to assign to the current configuration being stressed", false);
-        final OptionSimple title = new OptionSimple("title=", ".*", null, "Title for chart", false);
+        final OptionSimple title = new OptionSimple("title=", ".*", null, "Title for chart (current date by default)", false);
+        final OptionSimple operation = new OptionSimple("op=", ".*", null, "Alternative name for current operation (stress op name used by default)", false);
 
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(file, revision, title);
+            return Arrays.asList(file, revision, title, operation);
         }
     }
 
     // CLI Utility Methods
 
-    public static SettingsGraph get(Map<String, String[]> clArgs)
+    public static SettingsGraph get(Map<String, String[]> clArgs, SettingsCommand stressCommand)
     {
         String[] params = clArgs.remove("-graph");
         if (params == null)
         {
-            return new SettingsGraph(new GraphOptions());
+            return new SettingsGraph(new GraphOptions(), stressCommand);
         }
         GraphOptions options = GroupedOptions.select(params, new GraphOptions());
         if (options == null)
@@ -107,7 +118,7 @@ public class SettingsGraph implements Serializable
             System.out.println("Invalid -graph options provided, see output for valid options");
             System.exit(1);
         }
-        return new SettingsGraph(options);
+        return new SettingsGraph(options, stressCommand);
     }
 
     public static void printHelp()

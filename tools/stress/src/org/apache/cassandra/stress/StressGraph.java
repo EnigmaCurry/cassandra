@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -167,7 +168,7 @@ public class StressGraph
                     }
                     for (String m : parts)
                     {
-                        metrics.add(m.trim());
+                        metrics.add(new BigDecimal(m.trim()));
                     }
                     intervals.add(metrics);
                 }

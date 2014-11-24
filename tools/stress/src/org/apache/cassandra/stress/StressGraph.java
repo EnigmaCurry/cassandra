@@ -99,7 +99,6 @@ public class StressGraph
         Pattern pattern = Pattern.compile("(?s).*/\\* stats start \\*/\\nstats = (.*);\\n/\\* stats end \\*/.*");
         Matcher matcher = pattern.matcher(html);
         matcher.matches();
-        System.out.println(matcher.group(1));
         stats = (JSONObject) JSONValue.parse(matcher.group(1));
 
         return stats;
@@ -145,19 +144,16 @@ public class StressGraph
                 if (line.equals(StressMetrics.HEAD))
                 {
                     mode = readingMode.METRICS;
-                    System.out.println("Metrics mode");
                     continue;
                 }
                 else if (line.equals("Results:"))
                 {
                     mode = readingMode.AGGREGATES;
-                    System.out.println("Aggregates mode");
                     continue;
                 }
                 else if (line.equals("END"))
                 {
                     mode = readingMode.NONE;
-                    System.out.println("END mode");
                     break;
                 }
 

@@ -82,7 +82,7 @@ public class SettingsGraph implements Serializable
     private static final class GraphOptions extends GroupedOptions
     {
         final OptionSimple file = new OptionSimple("file=", ".*", null, "HTML file to generate", true);
-        final OptionSimple revision = new OptionSimple("revision=", ".*", "unknown", "Unique name to give to a collection of results in the graph", false);
+        final OptionSimple revision = new OptionSimple("revision=", ".*", "unknown", "Unique name to assign to the current configuration being stressed", false);
         final OptionSimple title = new OptionSimple("title=", ".*", null, "Title for chart", false);
 
         @Override

@@ -5,6 +5,8 @@ import com.google.common.io.ByteStreams;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
+import org.json.simple.JSONValue;
+import org.omg.SendingContext.RunTime;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -14,8 +16,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
-
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.apache.commons.lang3.StringUtils;
 
 /**
@@ -55,14 +61,23 @@ public class StressGraph
         JSONObject stats;
         if (htmlFile.isFile())
         {
-            //TODO: Load existing statistics to merge into new ones
-            stats = new JSONObject();
+            try
+            {
+                String html = new String(Files.readAllBytes(Paths.get(htmlFile.toURI())), StandardCharsets.UTF_8);
+                stats = parseExistingStats(html);
+            }
+            catch (IOException e)
+            {
+                e.printStackTrace();
+                throw new RuntimeException("Couldn't load existing stats html.");
+            }
+            stats = this.createJSONStats(stats);
         }
         else
         {
             stats = this.createJSONStats(null);
         }
-        System.out.println(stats);
+
         try
         {
             PrintWriter out = new PrintWriter(htmlFile);
@@ -75,6 +90,19 @@ public class StressGraph
         {
             e.printStackTrace();
         }
+    }
+
+    private JSONObject parseExistingStats(String html)
+    {
+        JSONObject stats;
+
+        Pattern pattern = Pattern.compile("(?s).*/\\* stats start \\*/\\nstats = (.*);\\n/\\* stats end \\*/.*");
+        Matcher matcher = pattern.matcher(html);
+        matcher.matches();
+        System.out.println(matcher.group(1));
+        stats = (JSONObject) JSONValue.parse(matcher.group(1));
+
+        return stats;
     }
 
     private String getGraphHTML()

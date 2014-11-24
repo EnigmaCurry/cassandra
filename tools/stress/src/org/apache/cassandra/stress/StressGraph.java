@@ -16,6 +16,8 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.util.Arrays;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -39,10 +41,12 @@ public class StressGraph
 
     private StressSettings stressSettings;
     private enum readingMode {NONE, METRICS, AGGREGATES};
+    private String[] stressArguments;
 
-    public StressGraph(StressSettings stressSetttings)
+    public StressGraph(StressSettings stressSetttings, String[] stressArguments)
     {
         this.stressSettings = stressSetttings;
+        this.stressArguments = stressArguments;
     }
 
     public void generateGraph()
@@ -158,7 +162,7 @@ public class StressGraph
         {
             e.printStackTrace();
         }
-
+        json.put("command", StringUtils.join(stressArguments, " "));
         json.put("intervals", intervals);
         return json;
     }

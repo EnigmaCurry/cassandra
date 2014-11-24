@@ -95,7 +95,7 @@ public class StressGraph
         json.put("metrics", Arrays.asList(StressMetrics.HEADMETRICS));
         json.put("test", stressSettings.command.type.name());
         json.put("revision", stressSettings.graph.revision);
-        
+
         readingMode mode = readingMode.NONE;
         try
         {
@@ -113,16 +113,19 @@ public class StressGraph
                 if (line.equals(StressMetrics.HEAD))
                 {
                     mode = readingMode.METRICS;
+                    System.out.println("Metrics mode");
                     continue;
                 }
                 else if (line.equals("Results:"))
                 {
                     mode = readingMode.AGGREGATES;
+                    System.out.println("Aggregates mode");
                     continue;
                 }
-                else if (line == "END")
+                else if (line.equals("END"))
                 {
                     mode = readingMode.NONE;
+                    System.out.println("END mode");
                     break;
                 }
 
@@ -142,7 +145,12 @@ public class StressGraph
                 }
                 else if (mode == readingMode.AGGREGATES)
                 {
-
+                    String[] parts = line.split(":",2);
+                    if (parts.length != 2)
+                    {
+                        continue;
+                    }
+                    json.put(parts[0].trim(), parts[1].trim());
                 }
             }
         }

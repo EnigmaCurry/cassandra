@@ -66,7 +66,8 @@ public class SettingsLog implements Serializable
         //Always print to stdout:
         MultiPrintStream stream = new MultiPrintStream(new PrintStream(System.out));
         //If log file is specified, record to that file in addition to stdout:
-        if (file != null) {
+        if (file != null)
+        {
             stream.addStream(new PrintStream(file));
         }
         return stream;

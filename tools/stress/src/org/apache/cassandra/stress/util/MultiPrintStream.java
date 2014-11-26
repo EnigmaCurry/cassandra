@@ -26,37 +26,44 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** PrintStream that multiplexes to multiple streams */
-public class MultiPrintStream extends PrintStream {
+public class MultiPrintStream extends PrintStream
+{
     private List<PrintStream> newStreams;
 
-    public MultiPrintStream(PrintStream baseStream) {
+    public MultiPrintStream(PrintStream baseStream)
+    {
         super(baseStream);
         this.newStreams = new ArrayList();
     }
 
-    public MultiPrintStream(PrintStream baseStream, List<PrintStream> newStreams) {
+    public MultiPrintStream(PrintStream baseStream, List<PrintStream> newStreams)
+    {
         super(baseStream);
         this.newStreams = newStreams;
     }
 
     @Override
-    public void flush() {
+    public void flush()
+    {
         super.flush();
         for (PrintStream s : newStreams)
             s.flush();
     }
 
     @Override
-    public void close() {
+    public void close()
+    {
         super.close();
         for (PrintStream s : newStreams)
             s.close();
     }
 
     @Override
-    public boolean checkError() {
+    public boolean checkError()
+    {
         boolean error = super.checkError();
-        for (PrintStream s : newStreams) {
+        for (PrintStream s : newStreams)
+        {
             if (s.checkError())
                 error = true;
         }
@@ -64,20 +71,23 @@ public class MultiPrintStream extends PrintStream {
     }
 
     @Override
-    public void write(int b) {
+    public void write(int b)
+    {
         super.write(b);
         for (PrintStream s: newStreams)
             s.write(b);
     }
 
     @Override
-    public void write(byte[] buf, int off, int len) {
+    public void write(byte[] buf, int off, int len)
+    {
         super.write(buf, off, len);
         for (PrintStream s: newStreams)
             s.write(buf, off, len);
     }
 
-    public void addStream(PrintStream printStream) {
+    public void addStream(PrintStream printStream)
+    {
         newStreams.add(printStream);
     }
 }

@@ -70,7 +70,6 @@ public class StressGraph
             }
             catch (IOException e)
             {
-                e.printStackTrace();
                 throw new RuntimeException("Couldn't load existing stats html.");
             }
             stats = this.createJSONStats(stats);
@@ -90,7 +89,7 @@ public class StressGraph
         }
         catch (IOException e)
         {
-            e.printStackTrace();
+            throw new RuntimeException("Couldn't write stats html.");
         }
     }
 
@@ -185,7 +184,8 @@ public class StressGraph
                 {
                     JSONArray metrics = new JSONArray();
                     String[] parts = line.split(",");
-                    if (parts.length != StressMetrics.HEADMETRICS.length){
+                    if (parts.length != StressMetrics.HEADMETRICS.length)
+                    {
                         continue;
                     }
                     for (String m : parts)
@@ -231,7 +231,7 @@ public class StressGraph
         }
         catch (IOException e)
         {
-            e.printStackTrace();
+            throw new RuntimeException("Couldn't read from temporary stress log file");
         }
         stats.add(json);
         return stats;

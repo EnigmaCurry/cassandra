@@ -23,6 +23,7 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import org.apache.commons.lang3.StringUtils;
 
 /**
@@ -47,7 +48,7 @@ public class StressGraph
 {
 
     private StressSettings stressSettings;
-    private enum readingMode {NONE, METRICS, AGGREGATES};
+    private enum readingMode {START, METRICS, AGGREGATES, NEXTITERATION, END};
     private String[] stressArguments;
 
     public StressGraph(StressSettings stressSetttings, String[] stressArguments)
@@ -120,25 +121,42 @@ public class StressGraph
         return graphHTML;
     }
 
-    private JSONObject parseLogStats(InputStream log) {
+    /** Parse log and append to stats array */
+    private JSONArray parseLogStats(InputStream log, JSONArray stats) {
         BufferedReader reader = new BufferedReader(new InputStreamReader(log));
         JSONObject json = new JSONObject();
         JSONArray intervals = new JSONArray();
-        json.put("metrics", Arrays.asList(StressMetrics.HEADMETRICS));
-        json.put("test", stressSettings.graph.operation);
-        json.put("revision", stressSettings.graph.revision);
+        boolean runningMultipleThreadCounts = false;
+        String currentThreadCount = null;
+        Pattern threadCountMessage = Pattern.compile("Running ([A-Z]+) with ([0-9]+) threads .*");
+        readingMode mode = readingMode.START;
 
-        readingMode mode = readingMode.NONE;
         try
         {
             String line;
-            while (true)
+            while (!mode.equals(readingMode.END))
             {
                 //Read the next line, break if null:
                 line = reader.readLine();
                 if (line == null)
                 {
                     break;
+                }
+
+                //Detect if we are running multiple thread counts:
+                if (line.startsWith("Thread count was not specified"))
+                {
+                    runningMultipleThreadCounts = true;
+                }
+
+                //Detect thread count:
+                Matcher tc = threadCountMessage.matcher(line);
+                if (tc.matches())
+                {
+                    if (runningMultipleThreadCounts)
+                    {
+                        currentThreadCount = tc.group(2);
+                    }
                 }
 
                 //Detect mode changes:
@@ -152,9 +170,13 @@ public class StressGraph
                     mode = readingMode.AGGREGATES;
                     continue;
                 }
-                else if (line.equals("END"))
+                else if (mode == readingMode.AGGREGATES && line.equals(""))
                 {
-                    mode = readingMode.NONE;
+                    mode = readingMode.NEXTITERATION;
+                }
+                else if (line.equals("END") || line.equals("FAILURE"))
+                {
+                    mode = readingMode.END;
                     break;
                 }
 
@@ -168,7 +190,14 @@ public class StressGraph
                     }
                     for (String m : parts)
                     {
-                        metrics.add(new BigDecimal(m.trim()));
+                        try
+                        {
+                            metrics.add(new BigDecimal(m.trim()));
+                        }
+                        catch (NumberFormatException e)
+                        {
+                            metrics.add(null);
+                        }
                     }
                     intervals.add(metrics);
                 }
@@ -181,15 +210,31 @@ public class StressGraph
                     }
                     json.put(parts[0].trim(), parts[1].trim());
                 }
+                else if (mode == readingMode.NEXTITERATION)
+                {
+                    //Wrap up the results of this test and append to the array.
+                    json.put("metrics", Arrays.asList(StressMetrics.HEADMETRICS));
+                    json.put("test", stressSettings.graph.operation);
+                    if (currentThreadCount == null)
+                        json.put("revision", stressSettings.graph.revision);
+                    else
+                        json.put("revision", String.format("%s - %s threads", stressSettings.graph.revision, currentThreadCount));
+                    json.put("command", StringUtils.join(stressArguments, " "));
+                    json.put("intervals", intervals);
+                    stats.add(json);
+                    //Start fresh for next iteration:
+                    json = new JSONObject();
+                    intervals = new JSONArray();
+                    mode = readingMode.START;
+                }
             }
         }
         catch (IOException e)
         {
             e.printStackTrace();
         }
-        json.put("command", StringUtils.join(stressArguments, " "));
-        json.put("intervals", intervals);
-        return json;
+        stats.add(json);
+        return stats;
     }
 
     private JSONObject createJSONStats(JSONObject json)
@@ -205,7 +250,7 @@ public class StressGraph
 
         try
         {
-            stats.add(parseLogStats(new FileInputStream(stressSettings.graph.temporaryLogFile)));
+            stats = parseLogStats(new FileInputStream(stressSettings.graph.temporaryLogFile), stats);
         }
         catch (FileNotFoundException e)
         {

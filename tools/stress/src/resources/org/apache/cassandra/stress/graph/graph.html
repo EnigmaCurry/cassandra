@@ -79,7 +79,7 @@ var drawGraph = function() {
     ymin = query.ymin;
     ymax = query.ymax;
 
-    //Stress-ng (2.1) metrics:
+    //Pull metrics from the stats json:
     stress_metrics = $.extend([], stats['stats'][0]['metrics']);
     $.each(stress_metrics, function(i,v) {
         stress_metrics[i] = v.replace(/\W/g,"_");
@@ -87,6 +87,20 @@ var drawGraph = function() {
     stress_metric_names = {};
     $.each(stress_metrics, function(i,v) {
         stress_metric_names[v] = stats['stats'][0]['metrics'][i];
+    });
+    //Replace names of shorthand metric names with longer ones:
+    //Replace names of shorthand metric names with longer ones:
+    $.extend(stress_metric_names, {
+       "mean": "latency mean",
+       "med" : "latency median",
+       "_95" : "latency 95th pct",
+       "_99" : "latency 99th pct",
+       "_999": "latency 99.9th pct",
+       "max" : "latency max",
+       "max_ms" : "gc max (ms)",
+       "sum_ms" : "gc sum (ms)",
+       "sdv_ms" : "gc sdv (ms)",
+       "mb"     : "gc MB"
     });
 
     var updateURLBar = function() {
@@ -282,9 +296,9 @@ var drawGraph = function() {
         });
 
         //Setup chart:
-        var margin = {top: 20, right: 1180, bottom: 2240, left: 60};
+        var margin = {top: 20, right: 1180, bottom: 4240, left: 60};
         var width = 2060 - margin.left - margin.right;
-        var height = 2700 - margin.top - margin.bottom;
+        var height = 4700 - margin.top - margin.bottom;
 
         var x = d3.scale.linear()
             .domain([xmin, xmax])
@@ -413,7 +427,7 @@ var drawGraph = function() {
             .attr("class", "legend")
             .attr("transform", function(d, i) {
                 if (show_aggregates == true) {
-                    var y_offset = 425 + (i*190) + 70;
+                    var y_offset = 425 + (i*240) + 70;
                 } else {
                     var y_offset = 425 + (i*25) + 70;
                 }
@@ -468,35 +482,55 @@ var drawGraph = function() {
                 return padTextEnd('row rate', 26) + ' : ' + data_by_title[title]['row rate'];
             });
 
-            renderLegendText(7, function(title) {
+            renderLegendText(6, function(title) {
                 return padTextEnd('latency mean', 26) + ' : ' + data_by_title[title]['latency mean'];
             });
 
-            renderLegendText(8, function(title) {
+            renderLegendText(7, function(title) {
                 return padTextEnd('latency median', 26) + ' : ' + data_by_title[title]['latency median'];
             });
 
-            renderLegendText(9, function(title) {
+            renderLegendText(8, function(title) {
                 return padTextEnd('latency 95th percentile', 26) + ' : ' + data_by_title[title]['latency 95th percentile'];
             });
 
-            renderLegendText(10, function(title) {
+            renderLegendText(9, function(title) {
                 return padTextEnd('latency 99th percentile', 26) + ' : ' + data_by_title[title]['latency 99th percentile'];
             });
 
-            renderLegendText(11, function(title) {
+            renderLegendText(10, function(title) {
                 return padTextEnd('latency 99.9th percentile', 26) + ' : ' + data_by_title[title]['latency 99.9th percentile'];
             });
 
-            renderLegendText(12, function(title) {
+            renderLegendText(11, function(title) {
                 return padTextEnd('latency max', 26) + ' : ' + data_by_title[title]['latency max'];
             });
 
+            renderLegendText(12, function(title) {
+                return padTextEnd('total gc count', 26) + ' : ' + data_by_title[title]['total gc count'];
+            });
+
             renderLegendText(13, function(title) {
-                return padTextEnd('Total operation time', 26) + ' : ' + data_by_title[title]['Total operation time'];
+                return padTextEnd('total gc mb', 26) + ' : ' + data_by_title[title]['total gc mb'];
             });
 
             renderLegendText(14, function(title) {
+                return padTextEnd('total gc time (s)', 26) + ' : ' + data_by_title[title]['total gc time (s)'];
+            });
+
+            renderLegendText(15, function(title) {
+                return padTextEnd('avg gc time(ms)', 26) + ' : ' + data_by_title[title]['avg gc time(ms)'];
+            });
+
+            renderLegendText(16, function(title) {
+                return padTextEnd('stdev gc time(ms)', 26) + ' : ' + data_by_title[title]['stdev gc time(ms)'];
+            });
+
+            renderLegendText(17, function(title) {
+                return padTextEnd('Total operation time', 26) + ' : ' + data_by_title[title]['Total operation time'];
+            });
+
+            renderLegendText(18, function(title) {
                 var cmd = data_by_title[title]['command'];
                 return 'cmd: ' + cmd;
             });

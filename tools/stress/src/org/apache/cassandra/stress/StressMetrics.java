@@ -235,6 +235,7 @@ public class StressMetrics
         output.println(String.format("stdev gc time(ms)         : %.0f", totalGcStats.sdvms));
         output.println("Total operation time      : " + DurationFormatUtils.formatDuration(
                 history.runTime(), "HH:mm:ss", true));
+        output.println(""); // Newline is important here to separate the aggregates section from the END or the next stress iteration
     }
 
     public static void summarise(List<String> ids, List<StressMetrics> summarise, PrintStream out, int historySampleCount)

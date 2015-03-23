@@ -204,14 +204,14 @@ JVM_OPTS="$JVM_OPTS -Xss256k"
 JVM_OPTS="$JVM_OPTS -XX:StringTableSize=1000003"
 
 # GC tuning options
-JVM_OPTS="$JVM_OPTS -XX:+UseParNewGC" 
-JVM_OPTS="$JVM_OPTS -XX:+UseConcMarkSweepGC" 
-JVM_OPTS="$JVM_OPTS -XX:+CMSParallelRemarkEnabled" 
-JVM_OPTS="$JVM_OPTS -XX:SurvivorRatio=8" 
-JVM_OPTS="$JVM_OPTS -XX:MaxTenuringThreshold=1"
-JVM_OPTS="$JVM_OPTS -XX:CMSInitiatingOccupancyFraction=75"
-JVM_OPTS="$JVM_OPTS -XX:+UseCMSInitiatingOccupancyOnly"
-JVM_OPTS="$JVM_OPTS -XX:+UseTLAB"
+# JVM_OPTS="$JVM_OPTS -XX:+UseParNewGC" 
+# JVM_OPTS="$JVM_OPTS -XX:+UseConcMarkSweepGC" 
+# JVM_OPTS="$JVM_OPTS -XX:+CMSParallelRemarkEnabled" 
+# JVM_OPTS="$JVM_OPTS -XX:SurvivorRatio=8" 
+# JVM_OPTS="$JVM_OPTS -XX:MaxTenuringThreshold=1"
+# JVM_OPTS="$JVM_OPTS -XX:CMSInitiatingOccupancyFraction=75"
+# JVM_OPTS="$JVM_OPTS -XX:+UseCMSInitiatingOccupancyOnly"
+# JVM_OPTS="$JVM_OPTS -XX:+UseTLAB"
 
 # note: bash evals '1.7.x' as > '1.7' so this is really a >= 1.7 jvm check
 if { [ "$JVM_VERSION" \> "1.7" ] && [ "$JVM_VERSION" \< "1.8.0" ] && [ "$JVM_PATCH_VERSION" -ge "60" ]; } || [ "$JVM_VERSION" \> "1.8" ] ; then

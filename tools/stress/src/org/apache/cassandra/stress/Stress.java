@@ -119,22 +119,17 @@ public final class Stress
             {
                 StressAction stressAction = new StressAction(settings, logout);
                 stressAction.run();
+                logout.flush();
+                if (settings.graph.inGraphMode())
+                {
+                    new StressGraph(settings, arguments).generateGraph();
+                }
             }
 
         }
         catch (Throwable t)
         {
-<<<<<<< 09ba1cca6cff68cacf7bc30d6c3d4484021c51f6
             t.printStackTrace();
-=======
-            StressAction stressAction = new StressAction(settings, logout);
-            stressAction.run();
-            logout.flush();
-            if (settings.graph.inGraphMode())
-            {
-                new StressGraph(settings, arguments).generateGraph();
-            }
->>>>>>> progress
         }
         finally
         {

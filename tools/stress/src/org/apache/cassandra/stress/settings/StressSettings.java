@@ -281,11 +281,8 @@ public class StressSettings implements Serializable
             }
             System.exit(1);
         }
-<<<<<<< ed65ff99c1b5972f9c707262aee1335f6bcd4ca7
-        return new StressSettings(command, rate, generate, insert, columns, samples, errors, log, mode, node, schema, transport, port, sendToDaemon);
-=======
-        return new StressSettings(command, rate, generate, insert, columns, errors, log, mode, node, schema, transport, port, sendToDaemon, graph);
->>>>>>> Adds -graph commandline option, but it doesn't do anything yet.
+
+        return new StressSettings(command, rate, generate, insert, columns, samples, errors, log, mode, node, schema, transport, port, sendToDaemon, graph);
     }
 
     private static Map<String, String[]> parseMap(String[] args)
